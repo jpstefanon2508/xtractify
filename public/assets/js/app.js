@@ -1,6 +1,8 @@
 ﻿const SOURCE_DATA = window.OFICINA_DATA || {};
 const STORAGE_KEY = "estratificacao.local.db.v1";
 const SESSION_KEY = "estratificacao.local.session";
+const SUPABASE_SESSION_KEY = "xtractify.supabase.session";
+const SUPABASE = window.XTRACTIFY_SUPABASE || {};
 
 const STATUS = ["rascunho", "enviado", "validado", "rejeitado", "corrigido", "importado"];
 const ID1_COLORS = {
@@ -448,6 +450,13 @@ function setPage(page) {
   if (!pageAllowed(page)) page = allowedPages()[0] || "home";
   state.page = page;
   syncNavigation();
+  if (page === "usuarios" && supabaseReady() && isDeveloperUser()) {
+    fetchSupabaseProfiles()
+      .then(() => {
+        if (state.page === "usuarios") render();
+      })
+      .catch((error) => toast(error.message || "Nao foi possivel atualizar usuarios."));
+  }
   render();
   $("#appMain").focus();
 }
@@ -1693,6 +1702,142 @@ function formData(form) {
   return Object.fromEntries(new FormData(form).entries());
 }
 
+function supabaseReady() {
+  return Boolean(SUPABASE.url && SUPABASE.key);
+}
+
+function localUserFromProfile(profile) {
+  return {
+    id: profile.id,
+    email: profile.email,
+    role: profile.role === "developer" ? "admin" : "user",
+    profileMode: profile.role || "client",
+    status: profile.status || "pending",
+    name: profile.full_name || profile.email,
+    reason: profile.requested_reason || "",
+    created_at: profile.created_at || "",
+    approved_at: profile.approved_at || "",
+    approved_by: profile.approved_by || "",
+  };
+}
+
+async function supabaseFetch(path, options = {}) {
+  if (!supabaseReady()) throw new Error("Supabase nao configurado.");
+  const session = getSupabaseSession();
+  const headers = {
+    apikey: SUPABASE.key,
+    "Content-Type": "application/json",
+    ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+    ...(options.headers || {}),
+  };
+  const response = await fetch(`${SUPABASE.url}${path}`, { ...options, headers });
+  const text = await response.text();
+  const payload = text ? JSON.parse(text) : null;
+  if (!response.ok) {
+    throw new Error(payload?.msg || payload?.message || payload?.error_description || "Erro ao comunicar com Supabase.");
+  }
+  return payload;
+}
+
+function getSupabaseSession() {
+  try {
+    return JSON.parse(localStorage.getItem(SUPABASE_SESSION_KEY) || "null");
+  } catch {
+    return null;
+  }
+}
+
+function setSupabaseSession(payload) {
+  localStorage.setItem(SUPABASE_SESSION_KEY, JSON.stringify({
+    access_token: payload.access_token,
+    refresh_token: payload.refresh_token,
+    expires_at: payload.expires_at || null,
+    user: payload.user,
+  }));
+}
+
+function clearSupabaseSession() {
+  localStorage.removeItem(SUPABASE_SESSION_KEY);
+  sessionStorage.removeItem(SESSION_KEY);
+}
+
+async function supabaseSignIn(email, password) {
+  const payload = await supabaseFetch("/auth/v1/token?grant_type=password", {
+    method: "POST",
+    body: JSON.stringify({ email, password }),
+  });
+  setSupabaseSession(payload);
+  const profile = await fetchSupabaseProfile(payload.user.id);
+  if (!profile) throw new Error("Perfil nao encontrado. Peça para o desenvolvedor aprovar seu cadastro.");
+  return profile;
+}
+
+async function supabaseSignUp(payload) {
+  const authPayload = await supabaseFetch("/auth/v1/signup", {
+    method: "POST",
+    body: JSON.stringify({
+      email: payload.email,
+      password: payload.password,
+      data: { full_name: payload.name, requested_reason: payload.reason || "" },
+    }),
+  });
+  if (!authPayload.session?.access_token && !authPayload.access_token) {
+    throw new Error("Cadastro criado. Confirme seu email antes de solicitar a aprovacao.");
+  }
+  setSupabaseSession(authPayload.session || authPayload);
+  await supabaseFetch("/rest/v1/user_profiles", {
+    method: "POST",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify({
+      id: authPayload.user.id,
+      organization_id: SUPABASE.organizationId,
+      full_name: payload.name,
+      email: payload.email,
+      role: "client",
+      status: "pending",
+      requested_reason: payload.reason || "",
+    }),
+  });
+  clearSupabaseSession();
+}
+
+async function fetchSupabaseProfile(userId) {
+  const rows = await supabaseFetch(`/rest/v1/user_profiles?id=eq.${encodeURIComponent(userId)}&select=*`, {
+    method: "GET",
+  });
+  return rows?.[0] || null;
+}
+
+async function fetchSupabaseProfiles() {
+  const rows = await supabaseFetch("/rest/v1/user_profiles?select=*&order=created_at.desc", {
+    method: "GET",
+  });
+  state.db.users = rows.map(localUserFromProfile);
+  saveDb();
+  return state.db.users;
+}
+
+async function updateSupabaseUserProfile(id, patch) {
+  const rows = await supabaseFetch(`/rest/v1/user_profiles?id=eq.${encodeURIComponent(id)}&select=*`, {
+    method: "PATCH",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify({
+      ...patch,
+      updated_at: new Date().toISOString(),
+    }),
+  });
+  const updated = rows?.[0];
+  if (!updated) throw new Error("Nenhum registro foi atualizado no Supabase.");
+  if (updated) {
+    const index = state.db.users.findIndex((item) => item.id === updated.id);
+    const local = localUserFromProfile(updated);
+    if (index >= 0) state.db.users[index] = local;
+    else state.db.users.push(local);
+    saveDb();
+  }
+  return updated;
+}
+
 function findUserByEmail(email) {
   return (state.db.users || []).find((user) => normalizeText(user.email) === normalizeText(email));
 }
@@ -2153,28 +2298,56 @@ function bindEvents() {
     $("#loginForm").classList.add("hidden");
   });
 
-  $("#loginForm").addEventListener("submit", (event) => {
+  $("#loginForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     const payload = formData(event.currentTarget);
-    const user = findUserByEmail(payload.email);
-    if (!user || user.password !== payload.password) {
+    let user = null;
+    if (supabaseReady()) {
+      try {
+        const profile = await supabaseSignIn(payload.email, payload.password);
+        user = localUserFromProfile(profile);
+        const index = state.db.users.findIndex((item) => item.id === user.id);
+        if (index >= 0) state.db.users[index] = user;
+        else state.db.users.push(user);
+        if (user.profileMode === "developer") await fetchSupabaseProfiles();
+      } catch (error) {
+        toast(error.message || "Email ou senha invalidos.");
+        return;
+      }
+    } else {
+      user = findUserByEmail(payload.email);
+    }
+    if (!user || (!supabaseReady() && user.password !== payload.password)) {
       toast("Email ou senha invalidos.");
       return;
     }
     if (user.status === "pending") {
+      if (supabaseReady()) clearSupabaseSession();
       toast("Seu cadastro ainda esta pendente de aprovacao.");
       return;
     }
     if (user.status === "rejected") {
+      if (supabaseReady()) clearSupabaseSession();
       toast("Seu acesso foi cancelado. Fale com o administrador.");
       return;
     }
     enterApp(user);
   });
 
-  $("#signupForm").addEventListener("submit", (event) => {
+  $("#signupForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     const payload = formData(event.currentTarget);
+    if (supabaseReady()) {
+      try {
+        await supabaseSignUp(payload);
+        event.currentTarget.reset();
+        $("#showLogin").click();
+        toast("Solicitacao enviada. Aguarde a validacao do desenvolvedor.");
+      } catch (error) {
+        toast(error.message || "Nao foi possivel criar o cadastro.");
+      }
+      return;
+    }
     if (findUserByEmail(payload.email)) {
       toast("Ja existe um cadastro com este email.");
       return;
@@ -2201,7 +2374,7 @@ function bindEvents() {
   });
 
   $("#logoutButton").addEventListener("click", () => {
-    sessionStorage.removeItem(SESSION_KEY);
+    clearSupabaseSession();
     state.currentUser = null;
     state.profileMode = "developer";
     state.page = "home";
@@ -2271,7 +2444,7 @@ function bindEvents() {
     render();
   });
 
-  $("#appMain").addEventListener("click", (event) => {
+  $("#appMain").addEventListener("click", async (event) => {
     const nav = event.target.closest("[data-nav]");
     if (nav) setPage(nav.dataset.nav);
 
@@ -2461,9 +2634,24 @@ function bindEvents() {
     if (approveUser) {
       const user = state.db.users.find((item) => item.id === approveUser.dataset.approveUser);
       if (!user) return;
-      user.status = "approved";
-      user.approved_at = new Date().toISOString();
-      user.approved_by = state.currentUser?.email || "admin@oficina.local";
+      if (supabaseReady()) {
+        try {
+          const updated = await updateSupabaseUserProfile(user.id, {
+            status: "approved",
+            role: user.profileMode || "client",
+            approved_by: state.currentUser?.id || null,
+            approved_at: new Date().toISOString(),
+          });
+          Object.assign(user, localUserFromProfile(updated));
+        } catch (error) {
+          toast(error.message || "Nao foi possivel aprovar o usuario.");
+          return;
+        }
+      } else {
+        user.status = "approved";
+        user.approved_at = new Date().toISOString();
+        user.approved_by = state.currentUser?.email || "admin@oficina.local";
+      }
       audit("usuario_aprovado", "users", user.id, `${user.email} aprovado como ${profileLabel(user.profileMode)}.`);
       saveDb();
       render();
@@ -2474,9 +2662,23 @@ function bindEvents() {
     if (rejectUser) {
       const user = state.db.users.find((item) => item.id === rejectUser.dataset.rejectUser);
       if (!user) return;
-      user.status = "rejected";
-      user.approved_at = "";
-      user.approved_by = state.currentUser?.email || "admin@oficina.local";
+      if (supabaseReady()) {
+        try {
+          const updated = await updateSupabaseUserProfile(user.id, {
+            status: "rejected",
+            approved_by: state.currentUser?.id || null,
+            approved_at: null,
+          });
+          Object.assign(user, localUserFromProfile(updated));
+        } catch (error) {
+          toast(error.message || "Nao foi possivel cancelar o usuario.");
+          return;
+        }
+      } else {
+        user.status = "rejected";
+        user.approved_at = "";
+        user.approved_by = state.currentUser?.email || "admin@oficina.local";
+      }
       audit("usuario_cancelado", "users", user.id, `${user.email} cancelado.`);
       saveDb();
       render();
@@ -2484,13 +2686,23 @@ function bindEvents() {
     }
   });
 
-  $("#appMain").addEventListener("change", (event) => {
+  $("#appMain").addEventListener("change", async (event) => {
     const userProfile = event.target.closest("[data-user-profile]");
     if (userProfile) {
       const user = state.db.users.find((item) => item.id === userProfile.dataset.userProfile);
       if (!user) return;
       user.profileMode = userProfile.value;
       user.role = user.profileMode === "developer" ? "admin" : "user";
+      if (supabaseReady()) {
+        try {
+          const updated = await updateSupabaseUserProfile(user.id, { role: user.profileMode });
+          Object.assign(user, localUserFromProfile(updated));
+        } catch (error) {
+          toast(error.message || "Nao foi possivel atualizar o perfil.");
+          render();
+          return;
+        }
+      }
       audit("perfil_usuario_alterado", "users", user.id, `${user.email} definido como ${profileLabel(user.profileMode)}.`);
       saveDb();
       render();
@@ -2580,12 +2792,40 @@ function bindEvents() {
   });
 }
 
-function init() {
+async function init() {
   state.db = loadDb();
   saveDb();
   populateFilters();
-  const session = sessionStorage.getItem(SESSION_KEY);
-  if (session) {
+  const supabaseSession = getSupabaseSession();
+  if (supabaseReady() && supabaseSession?.user?.id) {
+    try {
+      const profile = await fetchSupabaseProfile(supabaseSession.user.id);
+      if (profile?.status === "approved") {
+        const user = localUserFromProfile(profile);
+        const index = state.db.users.findIndex((item) => item.id === user.id);
+        if (index >= 0) state.db.users[index] = user;
+        else state.db.users.push(user);
+        if (user.profileMode === "developer") await fetchSupabaseProfiles();
+        state.currentUser = {
+          id: user.id,
+          email: user.email,
+          role: user.role || "user",
+          name: user.name || user.email,
+          profileMode: user.profileMode || "client",
+        };
+        state.profileMode = state.currentUser.profileMode;
+        sessionStorage.setItem(SESSION_KEY, JSON.stringify(state.currentUser));
+      } else {
+        clearSupabaseSession();
+        state.currentUser = null;
+      }
+    } catch {
+      clearSupabaseSession();
+      state.currentUser = null;
+    }
+  } else {
+    const session = sessionStorage.getItem(SESSION_KEY);
+    if (session) {
     state.currentUser = JSON.parse(session);
     const freshUser = findUserByEmail(state.currentUser.email);
     if (freshUser?.status === "approved") {
@@ -2601,6 +2841,7 @@ function init() {
     } else {
       sessionStorage.removeItem(SESSION_KEY);
       state.currentUser = null;
+    }
     }
   }
   if (state.currentUser) {

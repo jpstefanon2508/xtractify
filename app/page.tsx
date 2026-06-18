@@ -165,6 +165,16 @@ export default function HomePage() {
 
       <div id="toast" className="toast" role="status" aria-live="polite" />
 
+      <script
+        id="xtractify-config"
+        dangerouslySetInnerHTML={{
+          __html: `window.XTRACTIFY_SUPABASE=${JSON.stringify({
+            url: process.env.NEXT_PUBLIC_SUPABASE_URL || "",
+            key: process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || "",
+            organizationId: "00000000-0000-0000-0000-000000000001",
+          })};`,
+        }}
+      />
       <Script src="/assets/data/data.js" strategy="afterInteractive" />
       <Script src="/assets/js/app.js" strategy="afterInteractive" />
     </>
