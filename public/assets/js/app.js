@@ -1774,24 +1774,7 @@ async function supabaseSignUp(payload) {
       data: { full_name: payload.name, requested_reason: payload.reason || "" },
     }),
   });
-  if (!authPayload.session?.access_token && !authPayload.access_token) {
-    throw new Error("Cadastro criado. Confirme seu email antes de solicitar a aprovacao.");
-  }
-  setSupabaseSession(authPayload.session || authPayload);
-  await supabaseFetch("/rest/v1/user_profiles", {
-    method: "POST",
-    headers: { Prefer: "return=representation" },
-    body: JSON.stringify({
-      id: authPayload.user.id,
-      organization_id: SUPABASE.organizationId,
-      full_name: payload.name,
-      email: payload.email,
-      role: "client",
-      status: "pending",
-      requested_reason: payload.reason || "",
-    }),
-  });
-  clearSupabaseSession();
+  if (authPayload.session?.access_token || authPayload.access_token) clearSupabaseSession();
 }
 
 async function fetchSupabaseProfile(userId) {
