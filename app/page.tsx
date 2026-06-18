@@ -45,14 +45,14 @@ export default function HomePage() {
             <form id="loginForm" className="form-stack auth-form">
               <label>
                 Email
-                <input name="email" type="email" defaultValue="admin@oficina.local" autoComplete="username" required />
+                <input name="email" type="email" autoComplete="username" required />
               </label>
               <label>
                 Senha
-                <input name="password" type="password" defaultValue="admin123" autoComplete="current-password" required />
+                <input name="password" type="password" autoComplete="current-password" required />
               </label>
               <button className="primary-button" type="submit">Entrar</button>
-              <p className="hint">Usuario local de teste: admin@oficina.local / admin123</p>
+              <p className="hint">Use o email e senha cadastrados no Supabase.</p>
             </form>
             <form id="signupForm" className="form-stack auth-form hidden">
               <label>
