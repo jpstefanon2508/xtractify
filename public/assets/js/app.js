@@ -848,8 +848,9 @@ function launchRowsForActivity(session, endTime, closeReason) {
   if (!hhEach) return { created: 0, hhEach: 0 };
   const now = new Date().toISOString();
   const id2Desc = state.db.classifications.find((row) => row.id2 === session.currentActivity.id2)?.significado || "";
+  const createdRows = [];
   session.team.forEach((member) => {
-    state.db.timeRows.push({
+    const timeRow = {
       id: uid("time"),
       date: session.date,
       id1: session.currentActivity.id1,
@@ -867,10 +868,13 @@ function launchRowsForActivity(session, endTime, closeReason) {
       origem: "campo",
       status: closeReason === "encerramento" ? "enviado" : "enviado",
       field_session_id: session.id,
+      field_session_supabase_id: session.supabase_id || null,
       deleted: false,
       created_at: now,
       updated_at: now,
-    });
+    };
+    state.db.timeRows.push(timeRow);
+    createdRows.push(timeRow);
   });
   session.activities ||= [];
   session.activities.push({
@@ -881,7 +885,7 @@ function launchRowsForActivity(session, endTime, closeReason) {
     created_at: now,
   });
   audit("atividade_aferida", "field_sessions", session.id, `${session.team.length} apontamentos gerados de ${session.currentActivity.start_time} a ${endTime}.`);
-  return { created: session.team.length, hhEach };
+  return { created: session.team.length, hhEach, rows: createdRows };
 }
 
 function closeMemberActivity(session, member, endTime, closeReason = "troca") {
@@ -893,7 +897,7 @@ function closeMemberActivity(session, member, endTime, closeReason = "troca") {
   if (!hh) return { created: 0, hh: 0 };
   const now = new Date().toISOString();
   const id2Desc = state.db.classifications.find((row) => row.id2 === open.id2 && row.id1 === open.id1)?.significado || "";
-  state.db.timeRows.push({
+  const timeRow = {
     id: uid("time"),
     date: session.date,
     id1: open.id1,
@@ -911,10 +915,12 @@ function closeMemberActivity(session, member, endTime, closeReason = "troca") {
     origem: "campo",
     status: closeReason === "encerramento" ? "enviado" : "enviado",
     field_session_id: session.id,
+    field_session_supabase_id: session.supabase_id || null,
     deleted: false,
     created_at: now,
     updated_at: now,
-  });
+  };
+  state.db.timeRows.push(timeRow);
   session.activities ||= [];
   session.activities.push({
     ...open,
@@ -926,7 +932,7 @@ function closeMemberActivity(session, member, endTime, closeReason = "troca") {
     created_at: now,
   });
   audit("atividade_aferida", "field_sessions", session.id, `${member.funcionario}: ${open.id1}/${open.id2} de ${open.start_time} a ${endTime}.`);
-  return { created: 1, hh };
+  return { created: 1, hh, rows: [timeRow] };
 }
 
 function setMemberActivity(session, memberKeyValue, id1, id2, comentario = "") {
@@ -1838,6 +1844,140 @@ async function updateSupabaseUserProfile(id, patch) {
   return updated;
 }
 
+function mapSupabaseOrigin(value) {
+  return {
+    campo: "field",
+    field: "field",
+    manual: "manual",
+    importado: "imported",
+    imported: "imported",
+  }[value] || "manual";
+}
+
+function mapSupabaseStatus(value) {
+  return {
+    rascunho: "draft",
+    draft: "draft",
+    enviado: "submitted",
+    submitted: "submitted",
+    validado: "validated",
+    validated: "validated",
+    rejeitado: "rejected",
+    rejected: "rejected",
+    corrigido: "corrected",
+    corrected: "corrected",
+    importado: "imported",
+    imported: "imported",
+  }[value] || "validated";
+}
+
+function timeRowToSupabase(row) {
+  return {
+    organization_id: SUPABASE.organizationId,
+    entry_date: row.date,
+    start_time: row.hora_inicio || null,
+    end_time: row.hora_termino || null,
+    duration_hours: Number(row.hh) || 0,
+    man_hours: Number(row.hh) || 0,
+    employee_code: row.funcionario || null,
+    job_role_code: row.cargo || null,
+    surveyor_name: row.apurador || null,
+    block_code: String(row.bloco ?? "") || null,
+    id1_code: row.id1 || "",
+    id2_code: row.id2 || "",
+    id2_meaning: row.id2_desc || null,
+    comment: row.comentario || null,
+    origin: mapSupabaseOrigin(row.origem),
+    status: mapSupabaseStatus(row.status),
+    row_hash: row.id,
+    is_deleted: Boolean(row.deleted),
+    created_by: state.currentUser?.id || null,
+    ...(row.field_session_supabase_id ? { field_session_id: row.field_session_supabase_id } : {}),
+  };
+}
+
+function productionRowToSupabase(row) {
+  return {
+    organization_id: SUPABASE.organizationId,
+    production_date: row.date,
+    quantity: Number(row.qtde) || 0,
+    tag: row.tag || null,
+    type: row.tipo || null,
+    block_code: String(row.bloco ?? "") || null,
+    weight_ton: Number(row.peso_tn) || 0,
+    origin: mapSupabaseOrigin(row.origem),
+    status: mapSupabaseStatus(row.status),
+    row_hash: row.id,
+    is_deleted: Boolean(row.deleted),
+    created_by: state.currentUser?.id || null,
+  };
+}
+
+function fieldSessionToSupabase(session) {
+  return {
+    organization_id: SUPABASE.organizationId,
+    session_date: session.date,
+    start_time: session.start_time || null,
+    end_time: session.end_time || null,
+    surveyor_name: session.apurador || null,
+    team_members: session.team || [],
+    activities: session.activities || [],
+    current_activity: session.currentActivity || null,
+    status: session.status || "draft",
+    device_info: { source: "web", local_id: session.id },
+    created_by: state.currentUser?.id || null,
+  };
+}
+
+async function saveTimeRowsToSupabase(rows) {
+  if (!supabaseReady() || !rows?.length) return [];
+  const payload = rows.map(timeRowToSupabase);
+  const saved = await supabaseFetch("/rest/v1/time_entries?on_conflict=organization_id,row_hash&select=id,row_hash", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+    body: JSON.stringify(payload),
+  });
+  saved.forEach((remote) => {
+    const local = rows.find((row) => row.id === remote.row_hash);
+    if (local) local.supabase_id = remote.id;
+  });
+  return saved;
+}
+
+async function saveProductionRowsToSupabase(rows) {
+  if (!supabaseReady() || !rows?.length) return [];
+  const payload = rows.map(productionRowToSupabase);
+  const saved = await supabaseFetch("/rest/v1/production_entries?on_conflict=organization_id,row_hash&select=id,row_hash", {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+    body: JSON.stringify(payload),
+  });
+  saved.forEach((remote) => {
+    const local = rows.find((row) => row.id === remote.row_hash);
+    if (local) local.supabase_id = remote.id;
+  });
+  return saved;
+}
+
+async function saveFieldSessionToSupabase(session) {
+  if (!supabaseReady() || !session) return null;
+  if (session.supabase_id) {
+    const rows = await supabaseFetch(`/rest/v1/field_sessions?id=eq.${encodeURIComponent(session.supabase_id)}&select=id`, {
+      method: "PATCH",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify({ ...fieldSessionToSupabase(session), updated_at: new Date().toISOString() }),
+    });
+    return rows?.[0] || null;
+  }
+  const rows = await supabaseFetch("/rest/v1/field_sessions?select=id", {
+    method: "POST",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify(fieldSessionToSupabase(session)),
+  });
+  if (rows?.[0]?.id) session.supabase_id = rows[0].id;
+  return rows?.[0] || null;
+}
+
 function findUserByEmail(email) {
   return (state.db.users || []).find((user) => normalizeText(user.email) === normalizeText(email));
 }
@@ -1869,7 +2009,7 @@ function updateLiveClocks() {
   });
 }
 
-function upsertTime(payload, source = "manual") {
+async function upsertTime(payload, source = "manual") {
   const now = new Date().toISOString();
   const id2Desc = state.db.classifications.find((row) => row.id2 === payload.id2)?.significado || payload.id2_desc || "";
   const row = {
@@ -1889,22 +2029,33 @@ function upsertTime(payload, source = "manual") {
     deleted: false,
     updated_at: now,
   };
+  let savedRow = row;
   if (state.editingTimeId) {
     const index = state.db.timeRows.findIndex((item) => item.id === state.editingTimeId);
     state.db.timeRows[index] = { ...state.db.timeRows[index], ...row, status: row.status === "validado" ? "corrigido" : row.status };
+    savedRow = state.db.timeRows[index];
     audit("apontamento_editado", "time_entries", state.editingTimeId, `Apontamento ${state.editingTimeId} alterado.`);
     state.editingTimeId = null;
   } else {
     const id = uid("time");
-    state.db.timeRows.push({ id, ...row, created_at: now });
+    savedRow = { id, ...row, created_at: now };
+    state.db.timeRows.push(savedRow);
     audit("apontamento_criado", "time_entries", id, `Novo apontamento de ${fmt.format(row.hh)} Hh em ${row.date}.`);
+  }
+  let synced = true;
+  try {
+    await saveTimeRowsToSupabase([savedRow]);
+  } catch (error) {
+    console.error(error);
+    synced = false;
+    toast("Salvo localmente, mas ainda nao foi enviado ao Supabase.");
   }
   saveDb();
   render();
-  toast("Apontamento salvo e dashboard atualizado.");
+  if (synced) toast("Apontamento salvo no Supabase e dashboard atualizado.");
 }
 
-function upsertProduction(payload) {
+async function upsertProduction(payload) {
   const now = new Date().toISOString();
   const row = {
     date: payload.date,
@@ -1918,19 +2069,30 @@ function upsertProduction(payload) {
     deleted: false,
     updated_at: now,
   };
+  let savedRow = row;
   if (state.editingProductionId) {
     const index = state.db.productionRows.findIndex((item) => item.id === state.editingProductionId);
     state.db.productionRows[index] = { ...state.db.productionRows[index], ...row };
+    savedRow = state.db.productionRows[index];
     audit("qs_editado", "production_entries", state.editingProductionId, `QS ${state.editingProductionId} alterado.`);
     state.editingProductionId = null;
   } else {
     const id = uid("qs");
-    state.db.productionRows.push({ id, ...row, created_at: now });
+    savedRow = { id, ...row, created_at: now };
+    state.db.productionRows.push(savedRow);
     audit("qs_criado", "production_entries", id, `Nova producao QS ${row.qtde} em ${row.date}.`);
+  }
+  let synced = true;
+  try {
+    await saveProductionRowsToSupabase([savedRow]);
+  } catch (error) {
+    console.error(error);
+    synced = false;
+    toast("Salvo localmente, mas ainda nao foi enviado ao Supabase.");
   }
   saveDb();
   render();
-  toast("Producao QS salva e dashboard atualizado.");
+  if (synced) toast("Producao QS salva no Supabase e dashboard atualizado.");
 }
 
 function upsertMaster(kind, payload) {
@@ -2537,6 +2699,12 @@ function bindEvents() {
         session.status = "cancelled";
         session.ended_at = new Date().toISOString();
         audit("sessao_afericao_cancelada", "field_sessions", session.id, "Sessao de afericao cancelada.");
+        try {
+          await saveFieldSessionToSupabase(session);
+        } catch (error) {
+          console.error(error);
+          toast("Sessao cancelada localmente, mas ainda nao foi atualizada no Supabase.");
+        }
         saveDb();
         render();
         toast("Sessao cancelada.");
@@ -2551,9 +2719,11 @@ function bindEvents() {
       ensureMemberActivityState(session);
       const endTime = currentTimeValue();
       let created = 0;
+      const createdRows = [];
       session.team.forEach((member) => {
         const result = closeMemberActivity(session, member, endTime, "encerramento");
         created += result.created;
+        createdRows.push(...(result.rows || []));
         if (result.created) delete session.openByMember[memberKey(member)];
       });
       session.status = "finished";
@@ -2561,6 +2731,13 @@ function bindEvents() {
       session.ended_at = new Date().toISOString();
       state.reviewSessionId = session.id;
       audit("sessao_afericao_encerrada", "field_sessions", session.id, `Sessao encerrada as ${endTime}.`);
+      try {
+        await saveFieldSessionToSupabase(session);
+        await saveTimeRowsToSupabase(createdRows);
+      } catch (error) {
+        console.error(error);
+        toast("Turno encerrado localmente, mas ainda nao foi enviado ao Supabase.");
+      }
       saveDb();
       render();
       toast(`Turno encerrado. ${created} apontamentos gerados.`);
@@ -2580,6 +2757,12 @@ function bindEvents() {
         row.updated_at = new Date().toISOString();
       });
       audit("sessao_afericao_validada", "field_sessions", state.reviewSessionId, `${rows.length} apontamentos validados no fechamento.`);
+      try {
+        await saveTimeRowsToSupabase(rows);
+      } catch (error) {
+        console.error(error);
+        toast("Validacao salva localmente, mas ainda nao foi enviada ao Supabase.");
+      }
       state.reviewSessionId = null;
       saveDb();
       render();
@@ -2600,6 +2783,13 @@ function bindEvents() {
         return;
       }
       const result = setMemberActivity(session, key, id1, id2, comentario);
+      try {
+        await saveFieldSessionToSupabase(session);
+        await saveTimeRowsToSupabase(result.rows || []);
+      } catch (error) {
+        console.error(error);
+        toast("Atividade salva localmente, mas ainda nao foi enviada ao Supabase.");
+      }
       saveDb();
       render();
       toast(result.created ? `Intervalo fechado e nova atividade aberta.` : `Atividade aberta.`);
@@ -2615,6 +2805,13 @@ function bindEvents() {
       if (!member) return;
       const result = closeMemberActivity(session, member, currentTimeValue(), "encerramento");
       if (result.created) delete session.openByMember[key];
+      try {
+        await saveFieldSessionToSupabase(session);
+        await saveTimeRowsToSupabase(result.rows || []);
+      } catch (error) {
+        console.error(error);
+        toast("Colaborador encerrado localmente, mas ainda nao foi enviado ao Supabase.");
+      }
       saveDb();
       render();
       toast(result.created ? "Colaborador encerrado." : "Nada para encerrar neste colaborador.");
@@ -2720,8 +2917,8 @@ function bindEvents() {
 
   $("#appMain").addEventListener("submit", async (event) => {
     event.preventDefault();
-    if (["timeForm", "timeFormModal"].includes(event.target.id)) upsertTime(formData(event.target), state.page === "campo" ? "campo" : "manual");
-    if (["productionForm", "productionFormModal"].includes(event.target.id)) upsertProduction(formData(event.target));
+    if (["timeForm", "timeFormModal"].includes(event.target.id)) await upsertTime(formData(event.target), state.page === "campo" ? "campo" : "manual");
+    if (["productionForm", "productionFormModal"].includes(event.target.id)) await upsertProduction(formData(event.target));
     if (["masterForm", "masterFormModal"].includes(event.target.id)) upsertMaster(event.target.dataset.masterKind, formData(event.target));
     if (event.target.id === "fieldSessionForm") {
       const payload = formData(event.target);
@@ -2737,7 +2934,7 @@ function bindEvents() {
         return;
       }
       const id = uid("field");
-      state.db.fieldSessions.unshift({
+      const session = {
         id,
         date: payload.date,
         start_time: payload.start_time,
@@ -2750,8 +2947,15 @@ function bindEvents() {
         currentActivity: null,
         status: "active",
         created_at: new Date().toISOString(),
-      });
+      };
+      state.db.fieldSessions.unshift(session);
       audit("sessao_afericao_criada", "field_sessions", id, `Sessao criada com ${team.length} pessoas.`);
+      try {
+        await saveFieldSessionToSupabase(session);
+      } catch (error) {
+        console.error(error);
+        toast("Sessao salva localmente, mas ainda nao foi enviada ao Supabase.");
+      }
       saveDb();
       render();
       toast("Sessao criada. Agora inicie a primeira atividade.");
@@ -2769,6 +2973,12 @@ function bindEvents() {
           comentario: payload.comentario || "",
         };
         audit("atividade_afericao_iniciada", "field_sessions", session.id, `Atividade ${payload.id1}/${payload.id2} iniciada as ${eventTime}.`);
+        try {
+          await saveFieldSessionToSupabase(session);
+        } catch (error) {
+          console.error(error);
+          toast("Atividade salva localmente, mas ainda nao foi enviada ao Supabase.");
+        }
         saveDb();
         render();
         toast("Atividade iniciada. Na proxima troca, o intervalo sera lancado para toda a equipe.");
@@ -2785,6 +2995,13 @@ function bindEvents() {
         id2: payload.id2,
         comentario: payload.comentario || "",
       };
+      try {
+        await saveFieldSessionToSupabase(session);
+        await saveTimeRowsToSupabase(result.rows || []);
+      } catch (error) {
+        console.error(error);
+        toast("Intervalo salvo localmente, mas ainda nao foi enviado ao Supabase.");
+      }
       saveDb();
       render();
       toast(`Intervalo salvo: ${result.created} apontamentos de ${fmt.format(result.hhEach)} Hh cada.`);
