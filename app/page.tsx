@@ -42,7 +42,7 @@ export default function HomePage() {
               <button id="showLogin" className="active" type="button">Entrar</button>
               <button id="showSignup" type="button">Criar conta</button>
             </div>
-            <form id="loginForm" className="form-stack auth-form">
+            <form id="loginForm" className="form-stack auth-form" method="post" action="/">
               <label>
                 Email
                 <input name="email" type="email" autoComplete="username" required />
@@ -54,7 +54,7 @@ export default function HomePage() {
               <button className="primary-button" type="submit">Entrar</button>
               <p className="hint">Use o email e senha cadastrados no Supabase.</p>
             </form>
-            <form id="signupForm" className="form-stack auth-form hidden">
+            <form id="signupForm" className="form-stack auth-form hidden" method="post" action="/">
               <label>
                 Nome completo
                 <input name="name" autoComplete="name" required />
@@ -122,8 +122,8 @@ export default function HomePage() {
                 <span>Exportar Excel</span>
               </button>
               <button id="profileButton" className="user-chip" type="button" aria-label="Abrir perfil">
-                <span className="user-avatar">AL</span>
-                <span><strong>Administrador local</strong><small>Desenvolvedor</small></span>
+                <span className="user-avatar">XT</span>
+                <span><strong>Usuario</strong><small>Perfil online</small></span>
               </button>
             </div>
           </header>
@@ -164,6 +164,12 @@ export default function HomePage() {
 
       <div id="toast" className="toast" role="status" aria-live="polite" />
 
+      <script
+        id="strip-credential-query"
+        dangerouslySetInnerHTML={{
+          __html: `try{var u=new URL(window.location.href);if(u.searchParams.has("password")||u.searchParams.has("email")){u.searchParams.delete("password");u.searchParams.delete("email");window.history.replaceState({},document.title,u.pathname+u.search+u.hash)}}catch(e){}`,
+        }}
+      />
       <script
         id="xtractify-config"
         dangerouslySetInnerHTML={{

@@ -27,7 +27,7 @@ const state = {
   editingActionId: null,
   editingMasterId: null,
   reviewSessionId: null,
-  profileMode: "developer",
+  profileMode: "client",
   currentUser: null,
   db: null,
 };
@@ -210,19 +210,7 @@ function buildInitialDb() {
   return {
     version: 1,
     loaded_at: new Date().toISOString(),
-    users: [{
-      id: "user_admin",
-      email: "admin@oficina.local",
-      password: "admin123",
-      role: "admin",
-      profileMode: "developer",
-      status: "approved",
-      name: "Administrador local",
-      reason: "Usuario inicial do prototipo local.",
-      created_at: "base-original",
-      approved_at: "base-original",
-      approved_by: "system",
-    }],
+    users: [],
     timeRows,
     productionRows,
     classifications: SOURCE_DATA.catalog || [],
@@ -247,7 +235,7 @@ function buildInitialDb() {
       event: "base_inicial_carregada",
       entity: "system",
       entity_id: "base_original",
-      user_email: "admin@oficina.local",
+      user_email: "system",
       details: "Base original carregada no armazenamento local.",
       created_at: new Date().toISOString(),
     }],
@@ -292,7 +280,7 @@ function audit(event, entity, entityId, details) {
     event,
     entity,
     entity_id: entityId,
-    user_email: state.currentUser?.email || "admin@oficina.local",
+    user_email: state.currentUser?.email || "system",
     details,
     created_at: new Date().toISOString(),
   });
@@ -305,6 +293,23 @@ function toast(message) {
   node.classList.add("show");
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => node.classList.remove("show"), 2600);
+}
+
+function stripCredentialQueryParams() {
+  try {
+    const url = new URL(window.location.href);
+    const sensitiveKeys = ["email", "password", "senha", "access_token", "refresh_token"];
+    let changed = false;
+    sensitiveKeys.forEach((key) => {
+      if (url.searchParams.has(key)) {
+        url.searchParams.delete(key);
+        changed = true;
+      }
+    });
+    if (changed) window.history.replaceState({}, document.title, `${url.pathname}${url.search}${url.hash}`);
+  } catch {
+    // Ignore URL parsing failures; this is only a defensive cleanup.
+  }
 }
 
 function activeRows(kind) {
@@ -506,7 +511,7 @@ const ROLE_PAGES = {
 const FILTER_PAGES = ["home"];
 
 function allowedPages() {
-  return ROLE_PAGES[state.profileMode] || ROLE_PAGES.developer;
+  return ROLE_PAGES[state.profileMode] || ROLE_PAGES.client;
 }
 
 function isDeveloperUser() {
@@ -1482,9 +1487,9 @@ function renderPerfil() {
         <div class="profile-avatar">${escapeHtml((state.currentUser?.name || state.currentUser?.email || "U").slice(0, 2).toUpperCase())}</div>
         <dl class="profile-list">
           <div><dt>Nome</dt><dd>${escapeHtml(state.currentUser?.name || "Usuario")}</dd></div>
-          <div><dt>Email</dt><dd>${escapeHtml(state.currentUser?.email || "admin@oficina.local")}</dd></div>
+          <div><dt>Email</dt><dd>${escapeHtml(state.currentUser?.email || "-")}</dd></div>
           <div><dt>Perfil visualizado</dt><dd>${escapeHtml(activeProfileLabel)}</dd></div>
-          <div><dt>Ambiente</dt><dd>Local / navegador</dd></div>
+          <div><dt>Ambiente</dt><dd>Online / Supabase</dd></div>
         </dl>
       </article>
       <article class="card">
@@ -1675,8 +1680,8 @@ function render() {
   const profileButton = $("#profileButton");
   if (profileButton) {
     const label = profileLabel(state.profileMode);
-    const name = state.currentUser?.name || "Administrador local";
-    const initials = name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "AL";
+    const name = state.currentUser?.name || "Usuario";
+    const initials = name.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]).join("").toUpperCase() || "U";
     profileButton.innerHTML = `<span class="user-avatar">${escapeHtml(initials)}</span><span><strong>${escapeHtml(name)}</strong><small>${escapeHtml(label)}</small></span>`;
   }
 
@@ -1734,14 +1739,16 @@ async function supabaseFetch(path, options = {}) {
 
 function getSupabaseSession() {
   try {
-    return JSON.parse(localStorage.getItem(SUPABASE_SESSION_KEY) || "null");
+    localStorage.removeItem(SUPABASE_SESSION_KEY);
+    return JSON.parse(sessionStorage.getItem(SUPABASE_SESSION_KEY) || "null");
   } catch {
     return null;
   }
 }
 
 function setSupabaseSession(payload) {
-  localStorage.setItem(SUPABASE_SESSION_KEY, JSON.stringify({
+  localStorage.removeItem(SUPABASE_SESSION_KEY);
+  sessionStorage.setItem(SUPABASE_SESSION_KEY, JSON.stringify({
     access_token: payload.access_token,
     refresh_token: payload.refresh_token,
     expires_at: payload.expires_at || null,
@@ -1751,6 +1758,7 @@ function setSupabaseSession(payload) {
 
 function clearSupabaseSession() {
   localStorage.removeItem(SUPABASE_SESSION_KEY);
+  sessionStorage.removeItem(SUPABASE_SESSION_KEY);
   sessionStorage.removeItem(SESSION_KEY);
 }
 
@@ -2582,7 +2590,7 @@ function exportWorkbook(metrics = computeMetrics(), forcedSummary = "") {
     { name: "resumo_filtros", rows: [
       ["Campo", "Valor"],
       ["Gerado em", now.toLocaleString("pt-BR")],
-      ["Usuario", state.currentUser?.email || "admin@oficina.local"],
+      ["Usuario", state.currentUser?.email || "system"],
       ["Resumo", filterSummary],
       ["Inicio", filters.start],
       ["Fim", filters.end],
@@ -2658,7 +2666,8 @@ function bindEvents() {
 
   $("#loginForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const payload = formData(event.currentTarget);
+    const form = event.currentTarget;
+    const payload = formData(form);
     let user = null;
     if (!supabaseReady()) {
       toast("Supabase nao configurado. O app online precisa da base online para entrar.");
@@ -2673,9 +2682,11 @@ function bindEvents() {
       if (user.profileMode === "developer") await fetchSupabaseProfiles();
       await loadOperationalDataFromSupabase();
     } catch (error) {
+      if (form.elements.password) form.elements.password.value = "";
       toast(error.message || "Email ou senha invalidos.");
       return;
     }
+    if (form.elements.password) form.elements.password.value = "";
     if (!user) {
       toast("Email ou senha invalidos.");
       return;
@@ -2695,17 +2706,19 @@ function bindEvents() {
 
   $("#signupForm").addEventListener("submit", async (event) => {
     event.preventDefault();
-    const payload = formData(event.currentTarget);
+    const form = event.currentTarget;
+    const payload = formData(form);
     if (!supabaseReady()) {
       toast("Supabase nao configurado. Cadastros so podem ser feitos na base online.");
       return;
     }
     try {
       await supabaseSignUp(payload);
-      event.currentTarget.reset();
+      form.reset();
       $("#showLogin").click();
       toast("Solicitacao enviada. Aguarde a validacao do desenvolvedor.");
     } catch (error) {
+      if (form.elements.password) form.elements.password.value = "";
       toast(error.message || "Nao foi possivel criar o cadastro.");
     }
       return;
@@ -2714,7 +2727,7 @@ function bindEvents() {
   $("#logoutButton").addEventListener("click", () => {
     clearSupabaseSession();
     state.currentUser = null;
-    state.profileMode = "developer";
+    state.profileMode = "client";
     state.page = "home";
     $("#appShell").classList.add("hidden");
     $("#loginView").classList.remove("hidden");
@@ -2739,6 +2752,12 @@ function bindEvents() {
   });
 
   $("#profileMode").addEventListener("change", (event) => {
+    if (!isDeveloperUser()) {
+      state.profileMode = state.currentUser?.profileMode || "client";
+      event.target.value = state.profileMode;
+      toast("Apenas desenvolvedores podem alternar a visao.");
+      return;
+    }
     state.profileMode = event.target.value;
     if (!pageAllowed(state.page)) state.page = allowedPages()[0] || "home";
     render();
@@ -3012,7 +3031,7 @@ function bindEvents() {
       } else {
         user.status = "approved";
         user.approved_at = new Date().toISOString();
-        user.approved_by = state.currentUser?.email || "admin@oficina.local";
+        user.approved_by = state.currentUser?.email || "system";
       }
       audit("usuario_aprovado", "users", user.id, `${user.email} aprovado como ${profileLabel(user.profileMode)}.`);
       saveDb();
@@ -3039,7 +3058,7 @@ function bindEvents() {
       } else {
         user.status = "rejected";
         user.approved_at = "";
-        user.approved_by = state.currentUser?.email || "admin@oficina.local";
+        user.approved_by = state.currentUser?.email || "system";
       }
       audit("usuario_cancelado", "users", user.id, `${user.email} cancelado.`);
       saveDb();
@@ -3175,6 +3194,7 @@ function bindEvents() {
 }
 
 async function init() {
+  stripCredentialQueryParams();
   state.db = loadDb();
   saveDb();
   populateFilters();
