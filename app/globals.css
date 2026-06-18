@@ -1,4 +1,4 @@
-@import url("/assets/css/styles.css");
+@import "../public/assets/css/styles.css";
 
 html {
   color-scheme: light;
