@@ -455,14 +455,14 @@ function fillSelect(id, values) {
   )).join("");
 }
 
-function populateFilters() {
+function populateFilters(options = {}) {
   const { min, max } = allDates();
   $("#startDate").min = min;
   $("#startDate").max = max;
   $("#endDate").min = min;
   $("#endDate").max = max;
-  if (!$("#startDate").value) $("#startDate").value = min;
-  if (!$("#endDate").value) $("#endDate").value = max;
+  if (options.resetDates || !$("#startDate").value || $("#startDate").value < min || $("#startDate").value > max) $("#startDate").value = min;
+  if (options.resetDates || !$("#endDate").value || $("#endDate").value < min || $("#endDate").value > max) $("#endDate").value = max;
   fillSelect("filterId1", unique(activeRows("timeRows"), "id1"));
   const activeId1 = selectedValues("filterId1");
   const id2Source = activeId1.length ? activeRows("timeRows").filter((row) => activeId1.includes(row.id1)) : activeRows("timeRows");
@@ -2060,7 +2060,7 @@ async function loadOperationalDataFromSupabase() {
   if (productionRows.length) state.db.productionRows = productionRows.map(supabaseProductionEntryToLocal);
   state.db.loaded_from_supabase_at = new Date().toISOString();
   saveDb();
-  populateFilters();
+  populateFilters({ resetDates: true });
   return timeRows.length || productionRows.length || employees.length || id2Rows.length;
 }
 
@@ -3196,7 +3196,10 @@ async function init() {
   saveDb();
   populateFilters();
   const supabaseSession = getSupabaseSession();
-  if (supabaseReady() && supabaseSession?.user?.id) {
+  if (!supabaseReady()) {
+    clearSupabaseSession();
+    state.currentUser = null;
+  } else if (supabaseSession?.user?.id) {
     try {
       const profile = await fetchSupabaseProfile(supabaseSession.user.id);
       if (profile?.status === "approved") {
@@ -3224,25 +3227,8 @@ async function init() {
       state.currentUser = null;
     }
   } else {
-    const session = sessionStorage.getItem(SESSION_KEY);
-    if (session) {
-    state.currentUser = JSON.parse(session);
-    const freshUser = findUserByEmail(state.currentUser.email);
-    if (freshUser?.status === "approved") {
-      state.currentUser = {
-        id: freshUser.id,
-        email: freshUser.email,
-        role: freshUser.role || "user",
-        name: freshUser.name || freshUser.email,
-        profileMode: freshUser.profileMode || "client",
-      };
-      state.profileMode = state.currentUser.profileMode;
-      sessionStorage.setItem(SESSION_KEY, JSON.stringify(state.currentUser));
-    } else {
-      sessionStorage.removeItem(SESSION_KEY);
-      state.currentUser = null;
-    }
-    }
+    clearSupabaseSession();
+    state.currentUser = null;
   }
   if (state.currentUser) {
     $("#loginView").classList.add("hidden");
