@@ -796,6 +796,79 @@ textarea:focus {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
+.chart-card-wide {
+  min-height: 380px;
+}
+
+.chart-tall {
+  min-height: 300px;
+}
+
+.chart-grain-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #edf2f6;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55);
+}
+
+.chart-grain-toggle button {
+  min-height: 32px;
+  min-width: 52px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.chart-grain-toggle button.active {
+  background: #ffffff;
+  color: var(--ink);
+  box-shadow: 0 2px 8px rgba(29, 40, 51, 0.12);
+}
+
+.chart-axis-label {
+  fill: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.chart-value-label {
+  fill: var(--ink);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.chart-row-clickable {
+  cursor: pointer;
+}
+
+.chart-row-clickable:hover td {
+  background: #eef8f8;
+}
+
+.table-search {
+  width: min(420px, 42vw);
+  min-height: 38px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  background: #fff;
+}
+
+.compact-table {
+  max-height: 330px;
+}
+
 .stacked-flow {
   display: grid;
   grid-template-columns: 1fr;
@@ -864,6 +937,10 @@ textarea:focus {
 .chart {
   width: 100%;
   height: 250px;
+}
+
+.chart.chart-tall {
+  height: 330px;
 }
 
 .chart text {

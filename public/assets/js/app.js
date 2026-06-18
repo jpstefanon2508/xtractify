@@ -30,6 +30,14 @@ const state = {
   profileMode: "client",
   currentUser: null,
   db: null,
+  dashboardGrain: {
+    rup: "day",
+    id1Stacked: "day",
+    id1Cumulative: "day",
+    stoppage: "day",
+    qs: "day",
+  },
+  dashboardSearch: "",
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -117,6 +125,39 @@ function startOfWeek(value) {
   const day = date.getDay() || 7;
   date.setDate(date.getDate() - day + 1);
   return dateIso(date);
+}
+
+function endOfMonth(date) {
+  return new Date(date.getFullYear(), date.getMonth() + 1, 0);
+}
+
+function periodFor(dateValue, grain) {
+  const date = parseDate(dateValue);
+  if (grain === "year") return { start: `${date.getFullYear()}-01-01`, end: `${date.getFullYear()}-12-31` };
+  if (grain === "month") return { start: dateIso(new Date(date.getFullYear(), date.getMonth(), 1)), end: dateIso(endOfMonth(date)) };
+  if (grain === "week") {
+    const start = startOfWeek(dateValue);
+    return { start, end: addDays(start, 6) };
+  }
+  return { start: dateValue, end: dateValue };
+}
+
+function bucketKey(dateValue, grain) {
+  const date = parseDate(dateValue);
+  if (grain === "year") return String(date.getFullYear());
+  if (grain === "month") return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
+  if (grain === "week") return startOfWeek(dateValue);
+  return dateValue;
+}
+
+function bucketLabel(key, grain) {
+  if (grain === "year") return key;
+  if (grain === "month") {
+    const [year, month] = key.split("-");
+    return `${month}/${year}`;
+  }
+  if (grain === "week") return `Sem. ${formatDate(key)}`;
+  return formatDate(key);
 }
 
 function addDays(value, days) {
@@ -396,8 +437,19 @@ function computeMetrics(filters = getFilters()) {
   let cumHh = 0;
   let cumQs = 0;
   const daily = dates.map((date) => {
-    const dayHh = sum(timeByDate.get(date) || [], "hh");
+    const dayRows = timeByDate.get(date) || [];
+    const dayHh = sum(dayRows, "hh");
     const dayQs = sum(qsByDate.get(date) || [], qsField);
+    const byId1 = {};
+    const byId2 = {};
+    dayRows.forEach((row) => {
+      const id1 = row.id1 || "Sem ID1";
+      const id2 = row.id2 || "Sem ID2";
+      byId1[id1] = (byId1[id1] || 0) + row.hh;
+      if (!byId2[id2]) byId2[id2] = { id1, id2, desc: row.id2_desc || "", hh: 0, count: 0 };
+      byId2[id2].hh += row.hh;
+      byId2[id2].count += 1;
+    });
     cumHh += dayHh;
     cumQs += dayQs;
     return {
@@ -408,6 +460,8 @@ function computeMetrics(filters = getFilters()) {
       cum_hh: cumHh,
       cum_qs: cumQs,
       rup_cum: cumQs ? cumHh / cumQs : null,
+      byId1,
+      byId2,
     };
   });
 
@@ -563,34 +617,175 @@ function kpi(label, value, foot) {
 }
 
 function lineChart(daily, potential) {
-  if (!daily.length) return empty("Sem dados para o periodo filtrado.");
-  const width = 640;
-  const height = 240;
-  const pad = { l: 42, r: 20, t: 18, b: 34 };
-  const values = daily.flatMap((row) => [row.rup, row.rup_cum]).filter((value) => Number.isFinite(value));
+  const rows = aggregateDaily(daily, state.dashboardGrain.rup);
+  if (!rows.length) return empty("Sem dados para o periodo filtrado.");
+  const width = 760;
+  const height = 300;
+  const pad = { l: 52, r: 24, t: 34, b: 42 };
+  const dailyPointsSource = rows.filter((row) => Number.isFinite(row.rup) && row.rup > 0);
+  const cumPointsSource = rows.filter((row) => Number.isFinite(row.rup_cum) && row.rup_cum > 0);
+  const values = rows.flatMap((row) => [row.rup, row.rup_cum]).filter((value) => Number.isFinite(value) && value > 0);
   if (potential) values.push(potential);
   const max = Math.max(...values, 1);
-  const x = (i) => pad.l + (daily.length === 1 ? 0 : i * ((width - pad.l - pad.r) / (daily.length - 1)));
+  const x = (i) => pad.l + (rows.length === 1 ? 0 : i * ((width - pad.l - pad.r) / (rows.length - 1)));
   const y = (value) => height - pad.b - ((value || 0) / max) * (height - pad.t - pad.b);
-  const path = (key) => daily.map((row, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(row[key]).toFixed(1)}`).join(" ");
+  const rowIndex = new Map(rows.map((row, index) => [row.key, index]));
+  const pointPath = (points, key) => points.map((row) => {
+    const i = rowIndex.get(row.key) || 0;
+    return [x(i), y(row[key]), row];
+  });
   const potentialY = potential ? y(potential) : null;
+  const dailyPoints = pointPath(dailyPointsSource, "rup");
+  const cumPoints = pointPath(cumPointsSource, "rup_cum");
   return `
-    <svg class="chart" viewBox="0 0 ${width} ${height}" role="img" aria-label="RUP diaria, acumulada e potencial">
+    <svg class="chart chart-tall" viewBox="0 0 ${width} ${height}" role="img" aria-label="RUP diaria, acumulada e potencial">
       ${[0, 0.25, 0.5, 0.75, 1].map((p) => {
         const yy = pad.t + p * (height - pad.t - pad.b);
         const label = fmt.format(max * (1 - p));
         return `<line class="grid-line" x1="${pad.l}" x2="${width - pad.r}" y1="${yy}" y2="${yy}"></line><text x="4" y="${yy + 4}">${label}</text>`;
       }).join("")}
-      <path d="${path("rup")}" fill="none" stroke="#cf514a" stroke-width="3"></path>
-      <path d="${path("rup_cum")}" fill="none" stroke="#0f8b8d" stroke-width="3"></path>
+      ${dailyPoints.length > 1 ? `<path d="${linePath(dailyPoints)}" fill="none" stroke="#0f8b8d" stroke-width="3"></path>` : ""}
+      ${cumPoints.length > 1 ? `<path d="${linePath(cumPoints)}" fill="none" stroke="#14202b" stroke-width="3"></path>` : ""}
       ${potentialY ? `<line x1="${pad.l}" x2="${width - pad.r}" y1="${potentialY}" y2="${potentialY}" stroke="#d79722" stroke-width="2" stroke-dasharray="7 5"></line>` : ""}
-      ${daily.map((row, i) => `<circle cx="${x(i)}" cy="${y(row.rup || 0)}" r="3" fill="#cf514a"><title>${formatDate(row.date)} RUP ${row.rup ? fmt.format(row.rup) : "-"}</title></circle>`).join("")}
-      <text x="${pad.l}" y="${height - 9}">Inicio</text>
-      <text x="${width - 82}" y="${height - 9}">Fim</text>
-      <text x="${width - 230}" y="16">RUP diaria</text>
-      <text x="${width - 145}" y="16">RUP acum.</text>
-      <text x="${width - 65}" y="16">Potencial</text>
+      ${dailyPoints.map(([cx, cy, row]) => `<circle class="chart-clickable" ${chartFilterAttrs("period", row.key, { start: row.start, end: row.end })} cx="${cx}" cy="${cy}" r="4" fill="#0f8b8d"><title>${row.label} | RUP diaria ${fmt.format(row.rup)}</title></circle>`).join("")}
+      ${cumPoints.map(([cx, cy, row]) => `<circle cx="${cx}" cy="${cy}" r="3" fill="#14202b"><title>${row.label} | RUP acumulada ${fmt.format(row.rup_cum)}</title></circle>`).join("")}
+      ${rows.map((row, i) => (i === 0 || i === rows.length - 1 || i % Math.ceil(rows.length / 6) === 0)
+        ? `<text class="chart-axis-label" x="${x(i)}" y="${height - 14}" text-anchor="middle">${escapeHtml(row.label)}</text>` : "").join("")}
+      <g class="chart-legend" transform="translate(${width - 330},12)">
+        <circle cx="0" cy="0" r="4" fill="#0f8b8d"></circle><text x="10" y="4">RUP diaria</text>
+        <circle cx="104" cy="0" r="4" fill="#14202b"></circle><text x="114" y="4">Acumulada</text>
+        <line x1="208" x2="230" y1="0" y2="0" stroke="#d79722" stroke-width="2" stroke-dasharray="6 4"></line><text x="238" y="4">Potencial</text>
+      </g>
     </svg>
+  `;
+}
+
+function scaleLinear(domainMin, domainMax, rangeMin, rangeMax) {
+  const span = domainMax - domainMin || 1;
+  return (value) => rangeMin + ((value - domainMin) / span) * (rangeMax - rangeMin);
+}
+
+function linePath(points) {
+  return points.map((point, i) => `${i ? "L" : "M"}${point[0].toFixed(2)},${point[1].toFixed(2)}`).join(" ");
+}
+
+function timeToggle(chartKey) {
+  const items = [
+    ["year", "Ano"],
+    ["month", "Mes"],
+    ["week", "Semana"],
+    ["day", "Dia"],
+  ];
+  const current = state.dashboardGrain[chartKey] || "day";
+  return `
+    <div class="chart-grain-toggle" role="group" aria-label="Agrupamento do grafico">
+      ${items.map(([value, label]) => `<button type="button" data-chart-grain="${chartKey}" data-grain-value="${value}" class="${current === value ? "active" : ""}">${label}</button>`).join("")}
+    </div>
+  `;
+}
+
+function aggregateDaily(rows, grain) {
+  const map = new Map();
+  rows.forEach((row) => {
+    const key = bucketKey(row.date, grain);
+    if (!map.has(key)) {
+      const period = periodFor(row.date, grain);
+      map.set(key, { key, label: bucketLabel(key, grain), start: period.start, end: period.end, hh: 0, qs: 0, byId1: {}, byId2: {} });
+    }
+    const bucket = map.get(key);
+    bucket.hh += row.hh;
+    bucket.qs += row.qs;
+    Object.entries(row.byId1 || {}).forEach(([id1, value]) => {
+      bucket.byId1[id1] = (bucket.byId1[id1] || 0) + value;
+    });
+    Object.entries(row.byId2 || {}).forEach(([id2, value]) => {
+      if (!bucket.byId2[id2]) bucket.byId2[id2] = { ...value, hh: 0, count: 0 };
+      bucket.byId2[id2].hh += value.hh;
+      bucket.byId2[id2].count += value.count;
+    });
+  });
+  let cumHh = 0;
+  let cumQs = 0;
+  return [...map.values()].map((row) => {
+    cumHh += row.hh;
+    cumQs += row.qs;
+    return {
+      ...row,
+      rup: row.qs ? row.hh / row.qs : null,
+      rup_cum: cumQs ? cumHh / cumQs : null,
+    };
+  });
+}
+
+function chartFilterAttrs(field, value, extras = {}) {
+  return [
+    `data-chart-filter="${escapeHtml(field)}"`,
+    `data-chart-value="${escapeHtml(String(value))}"`,
+    extras.start ? `data-chart-start="${escapeHtml(extras.start)}"` : "",
+    extras.end ? `data-chart-end="${escapeHtml(extras.end)}"` : "",
+  ].filter(Boolean).join(" ");
+}
+
+function stackedId1Chart(metrics) {
+  const rows = aggregateDaily(metrics.daily, state.dashboardGrain.id1Stacked);
+  if (!rows.length) return empty("Sem dados para exibir.");
+  const categories = metrics.id1Distribution.map((row) => row.id1);
+  const width = 760;
+  const height = 300;
+  const pad = { l: 52, r: 20, t: 18, b: 40 };
+  const max = Math.max(...rows.map((row) => row.hh), 1) * 1.12;
+  const xStep = (width - pad.l - pad.r) / Math.max(1, rows.length);
+  const y = scaleLinear(0, max, height - pad.b, pad.t);
+  const ticks = [0, max / 2, max];
+  return `
+    <svg class="chart chart-tall" viewBox="0 0 ${width} ${height}" role="img" aria-label="RUP por categoria ID1 empilhado">
+      ${ticks.map((tick) => `<line class="grid-line" x1="${pad.l}" x2="${width - pad.r}" y1="${y(tick)}" y2="${y(tick)}"></line><text x="4" y="${y(tick) + 4}">${fmt.format(tick)}</text>`).join("")}
+      ${rows.map((row, i) => {
+        let acc = 0;
+        const barX = pad.l + i * xStep + xStep * 0.16;
+        const barW = Math.max(8, xStep * 0.68);
+        const rects = categories.map((id1) => {
+          const value = row.byId1[id1] || 0;
+          if (!value) return "";
+          const y0 = y(acc);
+          acc += value;
+          const y1 = y(acc);
+          return `<rect class="chart-clickable" ${chartFilterAttrs("id1", id1, { start: row.start, end: row.end })} x="${barX}" y="${y1}" width="${barW}" height="${Math.max(1, y0 - y1)}" fill="${id1Color(id1)}"><title>${row.label} | ${id1}: ${fmt.format(value)} Hh</title></rect>`;
+        }).join("");
+        const label = (i === 0 || i === rows.length - 1 || i % Math.ceil(rows.length / 6) === 0)
+          ? `<text class="chart-axis-label" x="${barX + barW / 2}" y="${height - 14}" text-anchor="middle">${escapeHtml(row.label)}</text>`
+          : "";
+        return rects + label;
+      }).join("")}
+    </svg>
+  `;
+}
+
+function rupCategoryTable(metrics) {
+  const rows = aggregateDaily(metrics.daily, state.dashboardGrain.id1Stacked)
+    .flatMap((period) => metrics.id1Distribution.map((cat) => {
+      const hh = period.byId1[cat.id1] || 0;
+      return { period: period.label, start: period.start, end: period.end, id1: cat.id1, hh, qs: period.qs, rup: period.qs ? hh / period.qs : null };
+    }))
+    .filter((row) => row.hh > 0);
+  if (!rows.length) return empty("Sem linhas para o agrupamento atual.");
+  return `
+    <div class="table-wrap compact-table">
+      <table>
+        <thead><tr><th>Periodo</th><th>ID1</th><th>HH</th><th>QS (pecas)</th><th>RUP</th></tr></thead>
+        <tbody>
+          ${rows.slice(0, 120).map((row) => `
+            <tr class="chart-row-clickable" ${chartFilterAttrs("id1", row.id1, { start: row.start, end: row.end })}>
+              <td>${escapeHtml(row.period)}</td>
+              <td>${escapeHtml(row.id1)}</td>
+              <td>${fmt.format(row.hh)}</td>
+              <td>${fmt0.format(row.qs)}</td>
+              <td><strong>${row.rup ? fmt.format(row.rup) : "-"}</strong></td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+    </div>
   `;
 }
 
@@ -620,8 +815,8 @@ function barChart(rows, labelKey, valueKey, colorFn) {
 }
 
 function qsChart(daily) {
-  const rows = daily.filter((row) => row.qs > 0);
-  return barChart(rows.map((row) => ({ label: formatDate(row.date), qs: row.qs })), "label", "qs", () => "#34699a");
+  const rows = aggregateDaily(daily, state.dashboardGrain.qs).filter((row) => row.qs > 0);
+  return barChart(rows.map((row) => ({ label: row.label, qs: row.qs })), "label", "qs", () => "#34699a");
 }
 
 function donutChart(rows, total) {
@@ -678,49 +873,67 @@ function renderHome(metrics) {
     ${renderKpis(metrics)}
     <section class="grid cols-2" style="margin-top:14px">
       <article class="card">
-        ${pageHeader("RUP diaria, acumulada e potencial", "Atualiza automaticamente com filtros e novos registros.")}
+        ${pageHeader("RUP diaria, acumulada e potencial", "Atualiza automaticamente com filtros e novos registros.", timeToggle("rup"))}
         ${lineChart(metrics.daily, metrics.potential)}
       </article>
       <article class="card">
         ${pageHeader("Pizza de % Hh por categoria (ID1)", "Clique em uma categoria para filtrar o dashboard.")}
         ${donutChart(metrics.id1Distribution, metrics.hh)}
       </article>
+      <article class="card chart-card-wide">
+        ${pageHeader("RUP por categoria (ID1)", "Hh/QS por periodo, empilhado por categoria ID1 para estratificar a produtividade.", timeToggle("id1Stacked"))}
+        ${stackedId1Chart(metrics)}
+      </article>
       <article class="card">
-        ${pageHeader("RUP por categoria (ID1)", "Hh por categoria para estratificar a produtividade.")}
-        ${barChart(metrics.id1Distribution, "id1", "hh", (row) => id1Color(row.id1))}
+        ${pageHeader("Tabela: RUP por categoria", "Valores do grafico ao lado, recalculados conforme filtros e agrupamento.")}
+        ${rupCategoryTable(metrics)}
+      </article>
+      <article class="card chart-card-wide">
+        ${pageHeader("RUP cumulativa por categoria (ID1)", "Regua cumulativa de produtividade por ID1 usando Hh acumulado da categoria dividido pelo QS acumulado.", timeToggle("id1Cumulative"))}
+        ${cumulativeId1Chart(metrics)}
       </article>
       <article class="card">
         ${pageHeader("Pareto de subcausas (ID2)", "Clique em uma subcausa para filtrar os demais graficos.")}
-        ${barChart(metrics.id2Pareto.slice(0, 12), "id2", "hh", () => "#d79722")}
+        ${paretoChart(metrics.id2Pareto)}
+      </article>
+      <article class="card chart-card-wide">
+        ${pageHeader("RUP diaria e cumulativa de paralisacoes (ID2)", "Hh de paralisacao/QS por subcausa ID2, com acumulado para priorizar perdas.", timeToggle("stoppage"))}
+        ${stoppageRupChart(metrics)}
       </article>
       <article class="card">
-        ${pageHeader("Producao (QS)", "Pecas por data, vindas da base QS.")}
+        ${pageHeader("Producao (QS)", "Pecas por data, vindas da base QS.", timeToggle("qs"))}
         ${qsChart(metrics.daily)}
       </article>
     </section>
     <section class="table-card" style="margin-top:14px">
-      ${pageHeader("Drill-down ID2", "Ranking detalhado das causas filtradas.")}
-      ${renderParetoTable(metrics.id2Pareto)}
+      ${pageHeader("Detalhamento por subcausa (ID2)", "Ranking por subcausa e amostra dos registros mais relevantes no filtro atual.", `<input id="dashboardTableSearch" class="table-search" type="search" value="${escapeHtml(state.dashboardSearch)}" placeholder="Buscar codigo, descricao, funcionario..." />`)}
+      ${renderParetoTable(metrics.id2Pareto, metrics.qs)}
     </section>
   `;
 }
 
-function renderParetoTable(rows) {
-  if (!rows.length) return empty("Sem registros para os filtros atuais.");
+function renderParetoTable(rows, qsTotal = 0) {
+  const query = normalizeText(state.dashboardSearch);
+  const filteredRows = rows.filter((row) => {
+    if (!query) return true;
+    return normalizeText(`${row.id1} ${row.id2} ${row.desc}`).includes(query);
+  });
+  if (!filteredRows.length) return empty("Sem registros para os filtros atuais.");
+  const total = rows.reduce((value, row) => value + row.hh, 0);
   return `
     <div class="table-wrap">
       <table>
-        <thead><tr><th>ID1</th><th>ID2</th><th>Significado</th><th>Hh</th><th>% Hh</th><th>% acum.</th><th>Ocorrencias</th></tr></thead>
+        <thead><tr><th>Categoria (ID1)</th><th>Subcausa (ID2)</th><th>Significado</th><th>Hh</th><th>% Hh</th><th>Ocorrencias</th><th>RUP base QS</th></tr></thead>
         <tbody>
-          ${rows.slice(0, 80).map((row) => `
-            <tr>
+          ${filteredRows.slice(0, 120).map((row) => `
+            <tr class="chart-row-clickable" ${chartFilterAttrs("id2", row.id2)}>
               <td>${escapeHtml(row.id1)}</td>
-              <td>${escapeHtml(row.id2)}</td>
+              <td><strong>${escapeHtml(row.id2)}</strong></td>
               <td>${escapeHtml(row.desc)}</td>
               <td>${fmt.format(row.hh)}</td>
-              <td>${pct.format(row.share || 0)}</td>
-              <td>${pct.format(row.accShare || 0)}</td>
+              <td>${pct.format(total ? row.hh / total : 0)}</td>
               <td>${fmt0.format(row.count)}</td>
+              <td>${qsTotal ? `${fmt.format(row.hh / qsTotal)} Hh/peca` : "-"}</td>
             </tr>
           `).join("")}
         </tbody>
@@ -878,6 +1091,141 @@ function launchRowsForActivity(session, endTime, closeReason) {
   });
   audit("atividade_aferida", "field_sessions", session.id, `${session.team.length} apontamentos gerados de ${session.currentActivity.start_time} a ${endTime}.`);
   return { created: session.team.length, hhEach, rows: createdRows };
+}
+
+function cumulativeId1Chart(metrics) {
+  const rows = aggregateDaily(metrics.daily, state.dashboardGrain.id1Cumulative);
+  const categories = metrics.id1Distribution.map((row) => row.id1);
+  if (!rows.length || !categories.length) return empty("Sem dados para exibir.");
+  const width = 760;
+  const height = 300;
+  const pad = { l: 52, r: 126, t: 20, b: 40 };
+  const series = categories.map((id1) => {
+    let cumHh = 0;
+    let cumQs = 0;
+    return {
+      id1,
+      points: rows.map((row) => {
+        cumHh += row.byId1[id1] || 0;
+        cumQs += row.qs || 0;
+        return { ...row, value: cumQs ? cumHh / cumQs : null };
+      }).filter((row) => Number.isFinite(row.value) && row.value > 0),
+    };
+  }).filter((item) => item.points.length);
+  const values = series.flatMap((item) => item.points.map((point) => point.value));
+  if (!values.length) return empty("Sem QS para calcular RUP cumulativa.");
+  const max = Math.max(...values, 1) * 1.12;
+  const x = scaleLinear(0, Math.max(1, rows.length - 1), pad.l, width - pad.r);
+  const y = scaleLinear(0, max, height - pad.b, pad.t);
+  const ticks = [0, max / 2, max];
+  const rowIndex = new Map(rows.map((row, index) => [row.key, index]));
+  return `
+    <svg class="chart chart-tall" viewBox="0 0 ${width} ${height}" role="img" aria-label="RUP cumulativa por ID1">
+      ${ticks.map((tick) => `<line class="grid-line" x1="${pad.l}" x2="${width - pad.r}" y1="${y(tick)}" y2="${y(tick)}"></line><text x="4" y="${y(tick) + 4}">${fmt.format(tick)}</text>`).join("")}
+      ${series.map((item) => {
+        const color = id1Color(item.id1);
+        const points = item.points.map((point) => [x(rowIndex.get(point.key) || 0), y(point.value), point]);
+        return `
+          <path d="${linePath(points)}" fill="none" stroke="${color}" stroke-width="2.4"></path>
+          ${points.map(([cx, cy, point]) => `<circle class="chart-clickable" ${chartFilterAttrs("id1", item.id1, { start: point.start, end: point.end })} cx="${cx}" cy="${cy}" r="3.5" fill="${color}"><title>${point.label} | ${item.id1}: ${fmt.format(point.value)} Hh/peca</title></circle>`).join("")}
+        `;
+      }).join("")}
+      ${rows.map((row, i) => (i === 0 || i === rows.length - 1 || i % Math.ceil(rows.length / 6) === 0)
+        ? `<text class="chart-axis-label" x="${x(i)}" y="${height - 14}" text-anchor="middle">${escapeHtml(row.label)}</text>` : "").join("")}
+      ${series.slice(0, 8).map((item, i) => `<g transform="translate(${width - pad.r + 12},${pad.t + i * 18})"><rect width="9" height="9" rx="2" fill="${id1Color(item.id1)}"></rect><text x="15" y="8" class="chart-axis-label">${escapeHtml(item.id1)}</text></g>`).join("")}
+    </svg>
+  `;
+}
+
+function paretoChart(rows) {
+  const topRows = rows.slice(0, 12);
+  if (!topRows.length) return empty("Sem dados para exibir.");
+  const width = 860;
+  const height = 340;
+  const pad = { l: 88, r: 176, t: 14, b: 24 };
+  const max = Math.max(...topRows.map((row) => row.hh), 1);
+  const total = rows.reduce((value, row) => value + row.hh, 0);
+  const x = scaleLinear(0, max, pad.l, width - pad.r);
+  const rowH = (height - pad.t - pad.b) / topRows.length;
+  let cumulative = 0;
+  return `
+    <svg class="chart chart-tall" viewBox="0 0 ${width} ${height}" role="img" aria-label="Pareto de subcausas ID2">
+      ${topRows.map((row, i) => {
+        const y = pad.t + i * rowH + 6;
+        cumulative += row.hh;
+        const share = total ? row.hh / total : 0;
+        const accShare = total ? cumulative / total : 0;
+        const barW = Math.max(2, x(row.hh) - pad.l);
+        return `
+          <text class="chart-axis-label" x="4" y="${y + 15}">${escapeHtml(row.id2)}</text>
+          <rect class="chart-clickable" ${chartFilterAttrs("id2", row.id2)} x="${pad.l}" y="${y}" width="${barW}" height="${Math.max(12, rowH - 10)}" rx="5" fill="${id1Color(row.id1)}"><title>${row.id2} | ${row.desc}: ${fmt.format(row.hh)} Hh</title></rect>
+          <text class="chart-value-label" x="${Math.min(width - pad.r - 8, pad.l + barW + 8)}" y="${y + 15}">${fmt.format(row.hh)} Hh</text>
+          <text class="chart-axis-label" x="${width - 8}" y="${y + 15}" text-anchor="end">${pct.format(share)} | acum. ${pct.format(accShare)}</text>
+        `;
+      }).join("")}
+    </svg>
+  `;
+}
+
+function stoppageRupChart(metrics) {
+  const paralRows = metrics.daily.map((row) => {
+    const byId2 = Object.values(row.byId2 || {}).filter((item) => normalizeText(item.id1) === "PARALISACAO");
+    return {
+      ...row,
+      hh: byId2.reduce((total, item) => total + item.hh, 0),
+      byId2: Object.fromEntries(byId2.map((item) => [item.id2, item])),
+    };
+  });
+  const rows = aggregateDaily(paralRows, state.dashboardGrain.stoppage);
+  const categories = [...new Set(rows.flatMap((row) => Object.values(row.byId2 || {}).map((item) => item.id2)))];
+  if (!rows.length || !categories.length) return empty("Sem paralisacoes para exibir.");
+  const width = 760;
+  const height = 300;
+  const pad = { l: 52, r: 22, t: 18, b: 40 };
+  let scaleCumHh = 0;
+  let scaleCumQs = 0;
+  const cumulativeValues = rows.map((row) => {
+    scaleCumHh += row.hh;
+    scaleCumQs += row.qs;
+    return scaleCumQs ? scaleCumHh / scaleCumQs : null;
+  }).filter((value) => Number.isFinite(value));
+  const max = Math.max(...rows.map((row) => row.hh), ...cumulativeValues, 1) * 1.12;
+  const xStep = (width - pad.l - pad.r) / Math.max(1, rows.length);
+  const y = scaleLinear(0, max, height - pad.b, pad.t);
+  const ticks = [0, max / 2, max];
+  let cumHh = 0;
+  let cumQs = 0;
+  const linePoints = rows.map((row, i) => {
+    cumHh += row.hh;
+    cumQs += row.qs;
+    const value = cumQs ? cumHh / cumQs : null;
+    return Number.isFinite(value) ? [pad.l + i * xStep + xStep / 2, y(value), row, value] : null;
+  }).filter(Boolean);
+  return `
+    <svg class="chart chart-tall" viewBox="0 0 ${width} ${height}" role="img" aria-label="RUP diaria e cumulativa de paralisacoes">
+      ${ticks.map((tick) => `<line class="grid-line" x1="${pad.l}" x2="${width - pad.r}" y1="${y(tick)}" y2="${y(tick)}"></line><text x="4" y="${y(tick) + 4}">${fmt.format(tick)}</text>`).join("")}
+      ${rows.map((row, i) => {
+        let acc = 0;
+        const barX = pad.l + i * xStep + xStep * 0.16;
+        const barW = Math.max(8, xStep * 0.68);
+        const rects = categories.map((id2) => {
+          const item = row.byId2[id2];
+          const value = item?.hh || 0;
+          if (!value) return "";
+          const y0 = y(acc);
+          acc += value;
+          const y1 = y(acc);
+          return `<rect class="chart-clickable" ${chartFilterAttrs("id2", id2, { start: row.start, end: row.end })} x="${barX}" y="${y1}" width="${barW}" height="${Math.max(1, y0 - y1)}" fill="${id1Color(item.id1)}"><title>${row.label} | ${id2}: ${fmt.format(value)} Hh</title></rect>`;
+        }).join("");
+        const label = (i === 0 || i === rows.length - 1 || i % Math.ceil(rows.length / 6) === 0)
+          ? `<text class="chart-axis-label" x="${barX + barW / 2}" y="${height - 14}" text-anchor="middle">${escapeHtml(row.label)}</text>`
+          : "";
+        return rects + label;
+      }).join("")}
+      ${linePoints.length > 1 ? `<path d="${linePath(linePoints)}" fill="none" stroke="#14202b" stroke-width="3"></path>` : ""}
+      ${linePoints.map(([cx, cy, row, value]) => `<circle cx="${cx}" cy="${cy}" r="4" fill="#14202b"><title>${row.label}: ${fmt.format(value)} Hh/peca</title></circle>`).join("")}
+    </svg>
+  `;
 }
 
 function closeMemberActivity(session, member, endTime, closeReason = "troca") {
@@ -2772,9 +3120,21 @@ function bindEvents() {
   $("#globalFilters").addEventListener("change", (event) => {
     if (event.target.id === "periodPreset") applyPreset(event.target.value);
     if (["startDate", "endDate"].includes(event.target.id)) $("#periodPreset").value = "custom";
+    if (event.target.id === "filterId1") populateFilters();
     render();
   });
   $("#globalSearch").addEventListener("input", render);
+  $("#appMain").addEventListener("input", (event) => {
+    if (event.target.id === "dashboardTableSearch") {
+      state.dashboardSearch = event.target.value;
+      render();
+      const search = $("#dashboardTableSearch");
+      if (search) {
+        search.focus();
+        search.setSelectionRange(search.value.length, search.value.length);
+      }
+    }
+  });
   $("#clearFilters").addEventListener("click", () => {
     $("#periodPreset").value = "all";
     $$("#globalFilters select").forEach((select) => { select.selectedIndex = 0; });
@@ -2782,11 +3142,13 @@ function bindEvents() {
     const { min, max } = allDates();
     $("#startDate").value = min;
     $("#endDate").value = max;
+    populateFilters();
     render();
   });
   $("#serviceOnly").addEventListener("click", () => {
     const select = $("#filterId1");
     [...select.options].forEach((option) => { option.selected = normalizeText(option.value) === "SERVICO"; });
+    populateFilters();
     render();
   });
 
@@ -2799,12 +3161,44 @@ function bindEvents() {
       const field = chartFilter.dataset.chartFilter;
       const value = chartFilter.dataset.chartValue;
       const selectId = field === "id1" ? "filterId1" : field === "id2" ? "filterId2" : "";
-      if (selectId && $(`#${selectId}`)) {
-        $(`#${selectId}`).value = value;
-        if (field === "id1") $("#filterId2").value = "";
+      if (field === "period") {
+        const start = chartFilter.dataset.chartStart || "";
+        const end = chartFilter.dataset.chartEnd || "";
+        const samePeriod = start && end && $("#startDate").value === start && $("#endDate").value === end;
+        const { min, max } = allDates();
+        $("#startDate").value = samePeriod ? min : start;
+        $("#endDate").value = samePeriod ? max : end;
+        $("#periodPreset").value = samePeriod ? "all" : "custom";
         render();
-        toast(`Filtro aplicado: ${field.toUpperCase()} ${value}`);
+        toast(samePeriod ? "Filtro de periodo removido." : `Filtro aplicado: ${formatDate(start)} a ${formatDate(end)}`);
+        return;
       }
+      if (selectId && $(`#${selectId}`)) {
+        const select = $(`#${selectId}`);
+        const start = chartFilter.dataset.chartStart || "";
+        const end = chartFilter.dataset.chartEnd || "";
+        const sameValue = selectedValues(selectId).includes(value);
+        const samePeriod = (!start && !end) || ($("#startDate").value === start && $("#endDate").value === end);
+        const removeFilter = sameValue && samePeriod;
+        [...select.options].forEach((option) => { option.selected = !removeFilter && option.value === value; });
+        if (field === "id1") $("#filterId2").value = "";
+        if (start && end) {
+          const { min, max } = allDates();
+          $("#startDate").value = removeFilter ? min : start;
+          $("#endDate").value = removeFilter ? max : end;
+          $("#periodPreset").value = removeFilter ? "all" : "custom";
+        }
+        if (field === "id1") populateFilters();
+        render();
+        toast(removeFilter ? `Filtro removido: ${field.toUpperCase()} ${value}` : `Filtro aplicado: ${field.toUpperCase()} ${value}`);
+      }
+    }
+
+    const grain = event.target.closest("[data-chart-grain]");
+    if (grain) {
+      state.dashboardGrain[grain.dataset.chartGrain] = grain.dataset.grainValue;
+      render();
+      return;
     }
 
     const tab = event.target.closest("[data-tab]");
