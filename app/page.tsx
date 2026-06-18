@@ -105,7 +105,6 @@ export default function HomePage() {
                 <option value="apurador">Apurador</option>
               </select>
             </label>
-            <button id="resetDemoData" className="ghost-button icon-button-text" type="button"><svg className="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 119 9M3 12h6M3 12l4-4" /></svg><span>Restaurar base</span></button>
             <button id="logoutButton" className="ghost-button icon-button-text" type="button"><svg className="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l5-5-5-5M15 12H3M21 4v16" /></svg><span>Sair</span></button>
           </div>
         </aside>

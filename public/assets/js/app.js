@@ -256,47 +256,34 @@ function buildInitialDb() {
   };
 }
 
+function buildEmptyDb() {
+  return {
+    version: 1,
+    loaded_at: new Date().toISOString(),
+    users: [],
+    timeRows: [],
+    productionRows: [],
+    classifications: [],
+    masterEmployees: [],
+    masterJobRoles: [],
+    masterProcesses: [],
+    masterBlocks: [],
+    masterSurveyors: [],
+    importBatches: [],
+    fieldSessions: [],
+    auditLogs: [],
+    actionItems: [],
+    exportJobs: [],
+  };
+}
+
 function loadDb() {
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if (!raw) return buildInitialDb();
-  try {
-    const parsed = JSON.parse(raw);
-    if (!parsed.version) return buildInitialDb();
-    parsed.fieldSessions ||= [];
-    parsed.actionItems ||= [];
-    parsed.exportJobs ||= [];
-    parsed.auditLogs ||= [];
-    parsed.users ||= buildInitialDb().users;
-    parsed.users = parsed.users.map((user, index) => ({
-      id: user.id || `user_${index + 1}`,
-      email: user.email,
-      password: user.password || (user.email === "admin@oficina.local" ? "admin123" : ""),
-      role: user.role || (user.email === "admin@oficina.local" ? "admin" : "user"),
-      profileMode: user.profileMode || (user.role === "admin" ? "developer" : "client"),
-      status: user.status || "approved",
-      name: user.name || user.email,
-      reason: user.reason || "",
-      created_at: user.created_at || "base-original",
-      approved_at: user.approved_at || "",
-      approved_by: user.approved_by || "",
-    }));
-    parsed.masterEmployees ||= [...groupBy((parsed.timeRows || []).filter((row) => row.funcionario), (row) => `${row.funcionario}|${row.cargo || ""}`).entries()]
-      .map(([key, rows], index) => {
-        const [name, cargo] = key.split("|");
-        return { id: `emp_${index + 1}`, code: name, name, cargo, status: "active", source: "excel" };
-      });
-    parsed.masterJobRoles ||= unique(parsed.timeRows || [], "cargo").map((name, index) => ({ id: `cargo_${index + 1}`, code: name, name, status: "active", source: "excel" }));
-    parsed.masterProcesses ||= unique(parsed.timeRows || [], "processo").map((name, index) => ({ id: `proc_${index + 1}`, code: name, name, status: "active", source: "excel" }));
-    parsed.masterBlocks ||= unique([...(parsed.timeRows || []), ...(parsed.productionRows || [])], "bloco").map((name, index) => ({ id: `bloco_${index + 1}`, code: name, name: `Bloco ${name}`, status: "active", source: "excel" }));
-    parsed.masterSurveyors ||= unique(parsed.timeRows || [], "apurador").map((name, index) => ({ id: `apurador_${index + 1}`, code: name, name, status: "active", source: "excel" }));
-    return parsed;
-  } catch {
-    return buildInitialDb();
-  }
+  localStorage.removeItem(STORAGE_KEY);
+  return buildEmptyDb();
 }
 
 function saveDb() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(state.db));
+  localStorage.removeItem(STORAGE_KEY);
 }
 
 function audit(event, entity, entityId, details) {
@@ -1335,12 +1322,12 @@ function renderExportacoes(metrics) {
       </article>
       <article class="card">
         ${pageHeader("Atalho operacional", "Semana anterior filtrada apenas para SERVICO.")}
-        <p class="muted">O periodo e calculado a partir da data mais recente da base local. Quando a base estiver atualizada diariamente, o atalho acompanha a semana operacional anterior.</p>
+        <p class="muted">O periodo e calculado a partir da data mais recente da base online do Supabase.</p>
         <button class="secondary-button" id="exportLastWeekService" type="button">Baixar semana passada / SERVICO</button>
       </article>
     </section>
     <section class="table-card" style="margin-top:14px">
-      ${pageHeader("Historico de exportacoes", "Auditoria local dos arquivos gerados.")}
+      ${pageHeader("Historico de exportacoes", "Auditoria dos arquivos gerados nesta sessao.")}
       ${renderExportHistory()}
     </section>
   `;
@@ -1491,10 +1478,10 @@ function renderPerfil() {
   return `
     <section class="grid cols-2">
       <article class="card profile-card">
-        ${pageHeader("Meu perfil", "Informacoes da sessao local e permissoes visiveis.")}
+        ${pageHeader("Meu perfil", "Informacoes do perfil online e permissoes visiveis.")}
         <div class="profile-avatar">${escapeHtml((state.currentUser?.name || state.currentUser?.email || "U").slice(0, 2).toUpperCase())}</div>
         <dl class="profile-list">
-          <div><dt>Nome</dt><dd>${escapeHtml(state.currentUser?.name || "Usuario local")}</dd></div>
+          <div><dt>Nome</dt><dd>${escapeHtml(state.currentUser?.name || "Usuario")}</dd></div>
           <div><dt>Email</dt><dd>${escapeHtml(state.currentUser?.email || "admin@oficina.local")}</dd></div>
           <div><dt>Perfil visualizado</dt><dd>${escapeHtml(activeProfileLabel)}</dd></div>
           <div><dt>Ambiente</dt><dd>Local / navegador</dd></div>
@@ -1978,6 +1965,179 @@ async function saveFieldSessionToSupabase(session) {
   return rows?.[0] || null;
 }
 
+function supabaseTimeEntryToLocal(row) {
+  return {
+    id: row.row_hash || row.id,
+    supabase_id: row.id,
+    date: row.entry_date,
+    id1: row.id1_code || "",
+    id2: row.id2_code || "",
+    id2_desc: row.id2_meaning || "",
+    hh: Number(row.man_hours) || 0,
+    funcionario: row.employee_code || "",
+    cargo: row.job_role_code || "",
+    apurador: row.surveyor_name || "",
+    bloco: String(row.block_code ?? ""),
+    processo: row.processes?.name || row.processes?.code || "",
+    comentario: row.comment || "",
+    hora_inicio: row.start_time || "",
+    hora_termino: row.end_time || "",
+    origem: row.origin === "field" ? "campo" : row.origin === "imported" ? "importado" : "manual",
+    status: {
+      draft: "rascunho",
+      submitted: "enviado",
+      validated: "validado",
+      rejected: "rejeitado",
+      corrected: "corrigido",
+      imported: "importado",
+    }[row.status] || "validado",
+    field_session_id: row.field_session_id || "",
+    deleted: Boolean(row.is_deleted),
+    created_at: row.created_at || "",
+    updated_at: row.updated_at || "",
+  };
+}
+
+function supabaseProductionEntryToLocal(row) {
+  return {
+    id: row.row_hash || row.id,
+    supabase_id: row.id,
+    date: row.production_date,
+    qtde: Number(row.quantity) || 0,
+    tag: row.tag || "",
+    tipo: row.type || "",
+    bloco: String(row.block_code ?? ""),
+    peso_tn: Number(row.weight_ton) || 0,
+    origem: row.origin === "imported" ? "importado" : "manual",
+    status: {
+      draft: "rascunho",
+      submitted: "enviado",
+      validated: "validado",
+      rejected: "rejeitado",
+      corrected: "corrigido",
+      imported: "importado",
+    }[row.status] || "validado",
+    deleted: Boolean(row.is_deleted),
+    created_at: row.created_at || "",
+    updated_at: row.updated_at || "",
+  };
+}
+
+async function loadOperationalDataFromSupabase() {
+  if (!supabaseReady()) return false;
+  const [
+    employees,
+    jobRoles,
+    processes,
+    blocks,
+    id1Rows,
+    id2Rows,
+    timeRows,
+    productionRows,
+  ] = await Promise.all([
+    supabaseFetch("/rest/v1/employees?select=*&order=code.asc"),
+    supabaseFetch("/rest/v1/job_roles?select=*&order=code.asc"),
+    supabaseFetch("/rest/v1/processes?select=*&order=code.asc"),
+    supabaseFetch("/rest/v1/blocks?select=*&order=code.asc"),
+    supabaseFetch("/rest/v1/classification_id1?select=*&order=code.asc"),
+    supabaseFetch("/rest/v1/classification_id2?select=*,classification_id1(code)&order=code.asc"),
+    supabaseFetch("/rest/v1/time_entries?select=*,processes(code,name)&is_deleted=eq.false&order=entry_date.asc"),
+    supabaseFetch("/rest/v1/production_entries?select=*&is_deleted=eq.false&order=production_date.asc"),
+  ]);
+
+  state.db.masterEmployees = employees.map((row) => ({ id: row.id, code: row.code, name: row.name, cargo: "", status: row.status, source: "supabase" }));
+  state.db.masterJobRoles = jobRoles.map((row) => ({ id: row.id, code: row.code, name: row.name, status: row.status, source: "supabase" }));
+  state.db.masterProcesses = processes.map((row) => ({ id: row.id, code: row.code, name: row.name, status: row.status, source: "supabase" }));
+  state.db.masterBlocks = blocks.map((row) => ({ id: row.id, code: row.code, name: row.name || row.code, status: row.status, source: "supabase" }));
+  state.db.classifications = id2Rows.map((row) => ({
+    id1: row.classification_id1?.code || id1Rows.find((item) => item.id === row.id1_id)?.code || "",
+    id2: row.code,
+    significado: row.meaning,
+    status: row.status,
+    source: "supabase",
+  }));
+  if (timeRows.length) state.db.timeRows = timeRows.map(supabaseTimeEntryToLocal);
+  if (productionRows.length) state.db.productionRows = productionRows.map(supabaseProductionEntryToLocal);
+  state.db.loaded_from_supabase_at = new Date().toISOString();
+  saveDb();
+  populateFilters();
+  return timeRows.length || productionRows.length || employees.length || id2Rows.length;
+}
+
+function simpleMasterConfig(kind) {
+  return {
+    employees: { table: "employees", store: "masterEmployees" },
+    roles: { table: "job_roles", store: "masterJobRoles" },
+    processes: { table: "processes", store: "masterProcesses" },
+    blocks: { table: "blocks", store: "masterBlocks" },
+  }[kind] || null;
+}
+
+async function saveMasterToSupabase(kind, payload) {
+  if (kind === "services") {
+    const id1Code = payload.id1 || payload.code;
+    if (!id1Code || !payload.id2) throw new Error("Informe ID1 e ID2.");
+    const id1Rows = await supabaseFetch("/rest/v1/classification_id1?on_conflict=organization_id,code&select=id,code", {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+      body: JSON.stringify({
+        organization_id: SUPABASE.organizationId,
+        code: id1Code,
+        name: id1Code,
+        status: payload.status || "active",
+      }),
+    });
+    const id1Id = id1Rows?.[0]?.id;
+    const id2Rows = await supabaseFetch("/rest/v1/classification_id2?on_conflict=organization_id,code&select=id,code", {
+      method: "POST",
+      headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+      body: JSON.stringify({
+        organization_id: SUPABASE.organizationId,
+        id1_id: id1Id,
+        code: payload.id2,
+        meaning: payload.significado || payload.meaning || payload.id2,
+        status: payload.status || "active",
+      }),
+    });
+    return id2Rows?.[0] || null;
+  }
+  const cfg = simpleMasterConfig(kind);
+  if (!cfg) throw new Error("Cadastro ainda nao possui tabela online dedicada.");
+  const code = payload.code || payload.name;
+  if (!code) throw new Error("Informe o codigo do cadastro.");
+  const rows = await supabaseFetch(`/rest/v1/${cfg.table}?on_conflict=organization_id,code&select=*`, {
+    method: "POST",
+    headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+    body: JSON.stringify({
+      organization_id: SUPABASE.organizationId,
+      code,
+      name: payload.name || code,
+      status: payload.status || "active",
+    }),
+  });
+  return rows?.[0] || null;
+}
+
+async function deleteMasterFromSupabase(kind, row) {
+  if (kind === "services") {
+    const code = row.id2 || row.code;
+    if (!code) return null;
+    return supabaseFetch(`/rest/v1/classification_id2?organization_id=eq.${SUPABASE.organizationId}&code=eq.${encodeURIComponent(code)}&select=id`, {
+      method: "PATCH",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify({ status: "inactive" }),
+    });
+  }
+  const cfg = simpleMasterConfig(kind);
+  if (!cfg) throw new Error("Cadastro ainda nao possui tabela online dedicada.");
+  const code = row.code || row.name;
+  return supabaseFetch(`/rest/v1/${cfg.table}?organization_id=eq.${SUPABASE.organizationId}&code=eq.${encodeURIComponent(code)}&select=id`, {
+    method: "PATCH",
+    headers: { Prefer: "return=representation" },
+    body: JSON.stringify({ status: "inactive" }),
+  });
+}
+
 function findUserByEmail(email) {
   return (state.db.users || []).find((user) => normalizeText(user.email) === normalizeText(email));
 }
@@ -2048,7 +2208,7 @@ async function upsertTime(payload, source = "manual") {
   } catch (error) {
     console.error(error);
     synced = false;
-    toast("Salvo localmente, mas ainda nao foi enviado ao Supabase.");
+    toast("Nao foi possivel gravar no Supabase. Tente novamente.");
   }
   saveDb();
   render();
@@ -2088,74 +2248,127 @@ async function upsertProduction(payload) {
   } catch (error) {
     console.error(error);
     synced = false;
-    toast("Salvo localmente, mas ainda nao foi enviado ao Supabase.");
+    toast("Nao foi possivel gravar no Supabase. Tente novamente.");
   }
   saveDb();
   render();
   if (synced) toast("Producao QS salva no Supabase e dashboard atualizado.");
 }
 
-function upsertMaster(kind, payload) {
+async function upsertMaster(kind, payload) {
   const cfg = MASTER_CONFIG[kind] || MASTER_CONFIG.employees;
   const rows = state.db[cfg.store];
+  let remote = null;
+  try {
+    remote = await saveMasterToSupabase(kind, payload);
+  } catch (error) {
+    console.error(error);
+    toast(error.message || "Nao foi possivel salvar o cadastro no Supabase.");
+    return;
+  }
   if (state.editingMasterId) {
     const index = rows.findIndex((row) => row.id === state.editingMasterId);
-    rows[index] = { ...rows[index], ...payload, updated_at: new Date().toISOString() };
+    rows[index] = { ...rows[index], id: remote?.id || rows[index].id, ...payload, source: "supabase", updated_at: new Date().toISOString() };
     audit("cadastro_editado", cfg.store, state.editingMasterId, `${cfg.title} alterado.`);
     state.editingMasterId = null;
   } else {
-    const id = uid(kind);
+    const id = remote?.id || uid(kind);
     rows.unshift({ id, ...payload, source: "manual", created_at: new Date().toISOString() });
     audit("cadastro_criado", cfg.store, id, `${cfg.title} criado.`);
   }
   saveDb();
   render();
-  toast("Cadastro salvo.");
+  toast("Cadastro salvo no Supabase.");
 }
 
-function deleteMaster(kind, id) {
+async function deleteMaster(kind, id) {
   const cfg = MASTER_CONFIG[kind] || MASTER_CONFIG.employees;
   const rows = state.db[cfg.store];
   const index = rows.findIndex((row) => row.id === id);
   if (index < 0) return;
+  try {
+    await deleteMasterFromSupabase(kind, rows[index]);
+  } catch (error) {
+    console.error(error);
+    toast(error.message || "Nao foi possivel excluir o cadastro no Supabase.");
+    return;
+  }
   rows.splice(index, 1);
   audit("cadastro_excluido", cfg.store, id, `${cfg.title} removido.`);
   saveDb();
   render();
-  toast("Cadastro excluido.");
+  toast("Cadastro excluido no Supabase.");
 }
 
-function softDelete(kind, id, label) {
+async function softDelete(kind, id, label) {
   const row = state.db[kind].find((item) => item.id === id);
   if (!row) return;
+  try {
+    if (kind === "timeRows") {
+      await supabaseFetch(`/rest/v1/time_entries?row_hash=eq.${encodeURIComponent(row.id)}&select=id`, {
+        method: "PATCH",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify({ is_deleted: true, updated_at: new Date().toISOString() }),
+      });
+    }
+    if (kind === "productionRows") {
+      await supabaseFetch(`/rest/v1/production_entries?row_hash=eq.${encodeURIComponent(row.id)}&select=id`, {
+        method: "PATCH",
+        headers: { Prefer: "return=representation" },
+        body: JSON.stringify({ is_deleted: true, updated_at: new Date().toISOString() }),
+      });
+    }
+  } catch (error) {
+    console.error(error);
+    toast("Nao foi possivel excluir no Supabase.");
+    return;
+  }
   row.deleted = true;
   row.updated_at = new Date().toISOString();
   audit(`${label}_excluido`, kind, id, `${label} ${id} excluido logicamente.`);
   saveDb();
   render();
-  toast("Registro excluido e dashboard atualizado.");
+  toast("Registro excluido no Supabase e dashboard atualizado.");
 }
 
-function duplicateTime(id) {
+async function duplicateTime(id) {
   const row = state.db.timeRows.find((item) => item.id === id);
   if (!row) return;
   const clone = { ...row, id: uid("time"), origem: "manual", status: "rascunho", created_at: new Date().toISOString(), updated_at: new Date().toISOString() };
+  try {
+    await saveTimeRowsToSupabase([clone]);
+  } catch (error) {
+    console.error(error);
+    toast("Nao foi possivel duplicar no Supabase.");
+    return;
+  }
   state.db.timeRows.push(clone);
   audit("apontamento_duplicado", "time_entries", clone.id, `Duplicado a partir de ${id}.`);
   saveDb();
   render();
-  toast("Registro duplicado como rascunho.");
+  toast("Registro duplicado no Supabase como rascunho.");
 }
 
-function changeTimeStatus(id, status) {
+async function changeTimeStatus(id, status) {
   const row = state.db.timeRows.find((item) => item.id === id);
   if (!row) return;
+  try {
+    await supabaseFetch(`/rest/v1/time_entries?row_hash=eq.${encodeURIComponent(row.id)}&select=id`, {
+      method: "PATCH",
+      headers: { Prefer: "return=representation" },
+      body: JSON.stringify({ status: mapSupabaseStatus(status), updated_at: new Date().toISOString() }),
+    });
+  } catch (error) {
+    console.error(error);
+    toast("Nao foi possivel atualizar o status no Supabase.");
+    return;
+  }
   row.status = status;
   row.updated_at = new Date().toISOString();
   audit(`apontamento_${status}`, "time_entries", id, `Status alterado para ${status}.`);
   saveDb();
   render();
-  toast(`Status alterado para ${status}.`);
+  toast(`Status alterado no Supabase para ${status}.`);
 }
 
 function csvEscape(value) {
@@ -2464,22 +2677,23 @@ function bindEvents() {
     event.preventDefault();
     const payload = formData(event.currentTarget);
     let user = null;
-    if (supabaseReady()) {
-      try {
-        const profile = await supabaseSignIn(payload.email, payload.password);
-        user = localUserFromProfile(profile);
-        const index = state.db.users.findIndex((item) => item.id === user.id);
-        if (index >= 0) state.db.users[index] = user;
-        else state.db.users.push(user);
-        if (user.profileMode === "developer") await fetchSupabaseProfiles();
-      } catch (error) {
-        toast(error.message || "Email ou senha invalidos.");
-        return;
-      }
-    } else {
-      user = findUserByEmail(payload.email);
+    if (!supabaseReady()) {
+      toast("Supabase nao configurado. O app online precisa da base online para entrar.");
+      return;
     }
-    if (!user || (!supabaseReady() && user.password !== payload.password)) {
+    try {
+      const profile = await supabaseSignIn(payload.email, payload.password);
+      user = localUserFromProfile(profile);
+      const index = state.db.users.findIndex((item) => item.id === user.id);
+      if (index >= 0) state.db.users[index] = user;
+      else state.db.users.push(user);
+      if (user.profileMode === "developer") await fetchSupabaseProfiles();
+      await loadOperationalDataFromSupabase();
+    } catch (error) {
+      toast(error.message || "Email ou senha invalidos.");
+      return;
+    }
+    if (!user) {
       toast("Email ou senha invalidos.");
       return;
     }
@@ -2499,40 +2713,19 @@ function bindEvents() {
   $("#signupForm").addEventListener("submit", async (event) => {
     event.preventDefault();
     const payload = formData(event.currentTarget);
-    if (supabaseReady()) {
-      try {
-        await supabaseSignUp(payload);
-        event.currentTarget.reset();
-        $("#showLogin").click();
-        toast("Solicitacao enviada. Aguarde a validacao do desenvolvedor.");
-      } catch (error) {
-        toast(error.message || "Nao foi possivel criar o cadastro.");
-      }
+    if (!supabaseReady()) {
+      toast("Supabase nao configurado. Cadastros so podem ser feitos na base online.");
       return;
     }
-    if (findUserByEmail(payload.email)) {
-      toast("Ja existe um cadastro com este email.");
-      return;
+    try {
+      await supabaseSignUp(payload);
+      event.currentTarget.reset();
+      $("#showLogin").click();
+      toast("Solicitacao enviada. Aguarde a validacao do desenvolvedor.");
+    } catch (error) {
+      toast(error.message || "Nao foi possivel criar o cadastro.");
     }
-    const id = uid("user");
-    state.db.users.push({
-      id,
-      email: payload.email,
-      password: payload.password,
-      role: "user",
-      profileMode: "client",
-      status: "pending",
-      name: payload.name,
-      reason: payload.reason || "",
-      created_at: new Date().toISOString(),
-      approved_at: "",
-      approved_by: "",
-    });
-    audit("usuario_solicitado", "users", id, `Novo usuario solicitou acesso: ${payload.email}.`);
-    saveDb();
-    event.currentTarget.reset();
-    $("#showLogin").click();
-    toast("Solicitacao enviada. Aguarde a validacao do desenvolvedor.");
+      return;
   });
 
   $("#logoutButton").addEventListener("click", () => {
@@ -2542,17 +2735,6 @@ function bindEvents() {
     state.page = "home";
     $("#appShell").classList.add("hidden");
     $("#loginView").classList.remove("hidden");
-  });
-
-  $("#resetDemoData").addEventListener("click", () => {
-    if (!confirm("Restaurar a base local original? Registros manuais serao apagados.")) return;
-    localStorage.removeItem(STORAGE_KEY);
-    state.db = buildInitialDb();
-    saveDb();
-    state.editingTimeId = null;
-    state.editingProductionId = null;
-    render();
-    toast("Base original restaurada.");
   });
 
   $("#toggleSidebar").addEventListener("click", () => {
@@ -2645,9 +2827,9 @@ function bindEvents() {
       render();
     }
     const duplicate = event.target.closest("[data-duplicate-time]");
-    if (duplicate) duplicateTime(duplicate.dataset.duplicateTime);
+    if (duplicate) await duplicateTime(duplicate.dataset.duplicateTime);
     const deleteTime = event.target.closest("[data-delete-time]");
-    if (deleteTime && confirm("Excluir este apontamento?")) softDelete("timeRows", deleteTime.dataset.deleteTime, "apontamento");
+    if (deleteTime && confirm("Excluir este apontamento?")) await softDelete("timeRows", deleteTime.dataset.deleteTime, "apontamento");
 
     const editProduction = event.target.closest("[data-edit-production]");
     if (editProduction) {
@@ -2656,12 +2838,12 @@ function bindEvents() {
       render();
     }
     const deleteProduction = event.target.closest("[data-delete-production]");
-    if (deleteProduction && confirm("Excluir este registro QS?")) softDelete("productionRows", deleteProduction.dataset.deleteProduction, "qs");
+    if (deleteProduction && confirm("Excluir este registro QS?")) await softDelete("productionRows", deleteProduction.dataset.deleteProduction, "qs");
 
     const validate = event.target.closest("[data-validate-time]");
-    if (validate) changeTimeStatus(validate.dataset.validateTime, "validado");
+    if (validate) await changeTimeStatus(validate.dataset.validateTime, "validado");
     const reject = event.target.closest("[data-reject-time]");
-    if (reject) changeTimeStatus(reject.dataset.rejectTime, "rejeitado");
+    if (reject) await changeTimeStatus(reject.dataset.rejectTime, "rejeitado");
 
     const cancel = event.target.closest("[data-cancel-edit]");
     if (cancel) {
@@ -2703,7 +2885,7 @@ function bindEvents() {
           await saveFieldSessionToSupabase(session);
         } catch (error) {
           console.error(error);
-          toast("Sessao cancelada localmente, mas ainda nao foi atualizada no Supabase.");
+          toast("Nao foi possivel atualizar a sessao no Supabase.");
         }
         saveDb();
         render();
@@ -2736,7 +2918,7 @@ function bindEvents() {
         await saveTimeRowsToSupabase(createdRows);
       } catch (error) {
         console.error(error);
-        toast("Turno encerrado localmente, mas ainda nao foi enviado ao Supabase.");
+        toast("Nao foi possivel enviar o encerramento ao Supabase.");
       }
       saveDb();
       render();
@@ -2761,7 +2943,7 @@ function bindEvents() {
         await saveTimeRowsToSupabase(rows);
       } catch (error) {
         console.error(error);
-        toast("Validacao salva localmente, mas ainda nao foi enviada ao Supabase.");
+        toast("Nao foi possivel enviar a validacao ao Supabase.");
       }
       state.reviewSessionId = null;
       saveDb();
@@ -2788,7 +2970,7 @@ function bindEvents() {
         await saveTimeRowsToSupabase(result.rows || []);
       } catch (error) {
         console.error(error);
-        toast("Atividade salva localmente, mas ainda nao foi enviada ao Supabase.");
+        toast("Nao foi possivel enviar a atividade ao Supabase.");
       }
       saveDb();
       render();
@@ -2810,7 +2992,7 @@ function bindEvents() {
         await saveTimeRowsToSupabase(result.rows || []);
       } catch (error) {
         console.error(error);
-        toast("Colaborador encerrado localmente, mas ainda nao foi enviado ao Supabase.");
+        toast("Nao foi possivel enviar o encerramento ao Supabase.");
       }
       saveDb();
       render();
@@ -2824,7 +3006,7 @@ function bindEvents() {
     }
     const deleteMasterButton = event.target.closest("[data-delete-master]");
     if (deleteMasterButton && confirm("Excluir este cadastro?")) {
-      deleteMaster(state.cadastroTab, deleteMasterButton.dataset.deleteMaster);
+      await deleteMaster(state.cadastroTab, deleteMasterButton.dataset.deleteMaster);
     }
 
     const approveUser = event.target.closest("[data-approve-user]");
@@ -2919,7 +3101,7 @@ function bindEvents() {
     event.preventDefault();
     if (["timeForm", "timeFormModal"].includes(event.target.id)) await upsertTime(formData(event.target), state.page === "campo" ? "campo" : "manual");
     if (["productionForm", "productionFormModal"].includes(event.target.id)) await upsertProduction(formData(event.target));
-    if (["masterForm", "masterFormModal"].includes(event.target.id)) upsertMaster(event.target.dataset.masterKind, formData(event.target));
+    if (["masterForm", "masterFormModal"].includes(event.target.id)) await upsertMaster(event.target.dataset.masterKind, formData(event.target));
     if (event.target.id === "fieldSessionForm") {
       const payload = formData(event.target);
       payload.date = todayIso();
@@ -2954,7 +3136,7 @@ function bindEvents() {
         await saveFieldSessionToSupabase(session);
       } catch (error) {
         console.error(error);
-        toast("Sessao salva localmente, mas ainda nao foi enviada ao Supabase.");
+          toast("Nao foi possivel criar a sessao no Supabase.");
       }
       saveDb();
       render();
@@ -2977,7 +3159,7 @@ function bindEvents() {
           await saveFieldSessionToSupabase(session);
         } catch (error) {
           console.error(error);
-          toast("Atividade salva localmente, mas ainda nao foi enviada ao Supabase.");
+          toast("Nao foi possivel iniciar a atividade no Supabase.");
         }
         saveDb();
         render();
@@ -3000,7 +3182,7 @@ function bindEvents() {
         await saveTimeRowsToSupabase(result.rows || []);
       } catch (error) {
         console.error(error);
-        toast("Intervalo salvo localmente, mas ainda nao foi enviado ao Supabase.");
+        toast("Nao foi possivel enviar o intervalo ao Supabase.");
       }
       saveDb();
       render();
@@ -3023,6 +3205,7 @@ async function init() {
         if (index >= 0) state.db.users[index] = user;
         else state.db.users.push(user);
         if (user.profileMode === "developer") await fetchSupabaseProfiles();
+        await loadOperationalDataFromSupabase();
         state.currentUser = {
           id: user.id,
           email: user.email,
